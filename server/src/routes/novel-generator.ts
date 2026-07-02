@@ -120,6 +120,53 @@ router.get('/:id/llm-configs', authenticate, (_req: AuthRequest, res) => {
   res.json(configs)
 })
 
+// ---------- POST /:id/extract-style ----------
+
+router.post('/:id/extract-style', authenticate, async (req: AuthRequest, res) => {
+  const db = getDB()
+  const novel = getNovelOrForbid(db, req.params.id, req)
+  if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
+
+  const config = getLLMConfigForTask(novel, req, 'architecture')
+  if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
+
+  const { style_reference } = req.body
+  if (!style_reference || style_reference.trim().length < 100) {
+    return res.status(400).json({ message: '文风参考内容太短，请至少提供100字以上的范文' })
+  }
+
+  try {
+    const ctx = { novel_id: novel.id, task: 'extract-style' }
+    
+    // 如果文风参考太长，截取前 15000 字
+    const truncatedReference = style_reference.length > 15000 
+      ? style_reference.slice(0, 15000) + '\n\n[... 内容过长，已截取前 15000 字]'
+      : style_reference
+
+    const styleGuide = await invokeWithRetry(
+      config,
+      P.SYSTEM_STYLE_EXTRACT,
+      P.USER_STYLE_EXTRACT(truncatedReference),
+      3,
+      ctx
+    )
+
+    // 保存到数据库
+    db.prepare('UPDATE novels SET style_reference = ?, style_guide = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
+      style_reference,
+      styleGuide,
+      novel.id
+    )
+
+    res.json({ 
+      message: '文风提取完成', 
+      style_guide: styleGuide 
+    })
+  } catch (err: any) {
+    res.status(500).json({ message: `文风提取失败: ${err.message}` })
+  }
+})
+
 // ---------- POST /:id/generate/architecture ----------
 
 router.post('/:id/generate/architecture', authenticate, async (req: AuthRequest, res) => {
@@ -286,8 +333,15 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
     const contentBeforeDraft = chapter.content || ''
     db.prepare('UPDATE novel_chapters SET content_before_draft = ? WHERE id = ?').run(contentBeforeDraft, chapter.id)
 
+    // 注入文风指南
+    const styleGuide = novel.style_guide || ''
+    const styleGuideSection = styleGuide 
+      ? `\n【文风要求】\n请严格模仿以下文风特征进行写作：\n${styleGuide}` 
+      : ''
+
     const isFirst = chapterNum === 1
-    const systemPrompt = isFirst ? P.SYSTEM_FIRST_CHAPTER : P.SYSTEM_CHAPTER_DRAFT
+    const baseSystemPrompt = isFirst ? P.SYSTEM_FIRST_CHAPTER : P.SYSTEM_CHAPTER_DRAFT
+    const systemPrompt = baseSystemPrompt.replace('{styleGuide}', styleGuideSection)
     const userPrompt = isFirst
       ? P.USER_FIRST_CHAPTER(context)
       : P.USER_CHAPTER_DRAFT(`当前是第 ${chapterNum} 章：${chapter.title}\n\n${context}`)
@@ -300,9 +354,10 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
     const targetWords = novel.word_number || 2000
     if (wordCount < targetWords * 0.7) {
       try {
+        const enrichSystemPrompt = P.SYSTEM_CHAPTER_DRAFT.replace('{styleGuide}', styleGuideSection)
         const enrichedContent = await invokeWithRetry(
           config,
-          P.SYSTEM_CHAPTER_DRAFT,
+          enrichSystemPrompt,
           P.USER_ENRICH_CHAPTER(content, targetWords),
           3,
           chapterCtx

@@ -91,6 +91,8 @@ export function initSchema() {
   addCol('status', "TEXT DEFAULT 'created'")
   addCol('llm_config', "TEXT DEFAULT ''")
   addCol('embedding_config', "TEXT DEFAULT ''")
+  addCol('style_reference', "TEXT DEFAULT ''")
+  addCol('style_guide', "TEXT DEFAULT ''")
 
   // migrate novel_chapters table
   const chapterCols = db.prepare("PRAGMA table_info('novel_chapters')").all() as { name: string }[]

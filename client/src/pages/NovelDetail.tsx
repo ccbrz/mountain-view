@@ -94,6 +94,11 @@ export default function NovelDetail() {
   const [architectureInput, setArchitectureInput] = useState('')
   const [savingInput, setSavingInput] = useState(false)
 
+  // style reference
+  const [styleReference, setStyleReference] = useState('')
+  const [styleGuide, setStyleGuide] = useState('')
+  const [extractingStyle, setExtractingStyle] = useState(false)
+
   // consistency check
   const [consistencyResult, setConsistencyResult] = useState<{ result: string; has_conflict: boolean } | null>(null)
 
@@ -183,6 +188,8 @@ export default function NovelDetail() {
       }
       setTaskConfigs(saved)
       setEmbeddingConfig(n.data.embedding_config || '')
+      setStyleReference(n.data.style_reference || '')
+      setStyleGuide(n.data.style_guide || '')
       settingsForm.setFieldsValue(n.data)
     }).catch(() => message.error('加载小说失败'))
       .finally(() => setLoading(false))
@@ -254,6 +261,30 @@ export default function NovelDetail() {
       message.error('保存失败')
     } finally {
       setSavingInput(false)
+    }
+  }
+
+  const extractStyle = async () => {
+    if (!styleReference || styleReference.trim().length < 100) {
+      message.error('文风参考内容太短，请至少提供100字以上的范文')
+      return
+    }
+    if (!taskConfigs.architecture) {
+      message.error('请先在 LLM 配置中选择架构模型')
+      return
+    }
+    setExtractingStyle(true)
+    try {
+      const res = await api.post(`/novels/${id}/extract-style`, {
+        style_reference: styleReference,
+        llm_config: taskConfigs.architecture
+      })
+      setStyleGuide(res.data.style_guide)
+      message.success('文风提取完成')
+    } catch (err: any) {
+      message.error('文风提取失败: ' + (err.response?.data?.message || err.message))
+    } finally {
+      setExtractingStyle(false)
     }
   }
 
@@ -665,16 +696,68 @@ export default function NovelDetail() {
               </Space>
             }
           >
-            <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>
-              请输入你的架构构想，点击"生成架构"让 AI 整理为最佳实践，确认后点击"保存"：
-            </div>
-            <TextArea
-              value={architectureInput}
-              onChange={(e) => setArchitectureInput(e.target.value)}
-              rows={16}
-              placeholder="例如：一个关于时间旅行的故事，主角是一个物理学家，他发现了一种可以回到过去的方法，但每次改变过去都会导致未来发生不可预测的变化..."
-              style={{ fontFamily: 'inherit', fontSize: 14 }}
-            />
+            <Spin spinning={generating === 'architecture'} tip="AI 正在整理架构...">
+              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>
+                请输入你的架构构想，点击"生成架构"让 AI 整理为最佳实践，确认后点击"保存"：
+              </div>
+              <TextArea
+                value={architectureInput}
+                onChange={(e) => setArchitectureInput(e.target.value)}
+                rows={16}
+                placeholder="例如：一个关于时间旅行的故事，主角是一个物理学家，他发现了一种可以回到过去的方法，但每次改变过去都会导致未来发生不可预测的变化..."
+                style={{ fontFamily: 'inherit', fontSize: 14 }}
+              />
+            </Spin>
+          </Card>
+
+          <Card
+            title="文风参考"
+            extra={
+              <Space>
+                <Button
+                  loading={extractingStyle}
+                  onClick={extractStyle}
+                  disabled={!styleReference || styleReference.trim().length < 100}
+                >
+                  提取文风
+                </Button>
+              </Space>
+            }
+          >
+            <Spin spinning={extractingStyle} tip="AI 正在分析文风特征...">
+              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>
+                粘贴你喜欢的范文片段（建议 500 字以上），AI 会提取其写作风格并应用到后续章节生成中：
+              </div>
+              <TextArea
+                value={styleReference}
+                onChange={(e) => setStyleReference(e.target.value)}
+                rows={8}
+                placeholder="在此粘贴你喜欢的文风参考范文...&#10;&#10;例如：&#10;月光如水，洒在青石板上。她静静地站在那里，像一幅被时光定格的画。风掠过她的发梢，带来远处桂花的清香。这一刻，世界仿佛静止了，只剩下她微微颤抖的睫毛，和那欲言又止的唇..."
+                style={{ fontFamily: 'serif', fontSize: 14 }}
+              />
+              {styleGuide && (
+                <>
+                  <Divider style={{ margin: '16px 0' }}>
+                    <span style={{ color: '#52c41a' }}>✓ 已提取的文风指南</span>
+                  </Divider>
+                  <pre style={{
+                    whiteSpace: 'pre-wrap',
+                    fontFamily: 'inherit',
+                    fontSize: 13,
+                    lineHeight: 1.8,
+                    color: '#333',
+                    background: '#f6ffed',
+                    padding: 16,
+                    borderRadius: 6,
+                    border: '1px solid #b7eb8f',
+                    maxHeight: 300,
+                    overflow: 'auto',
+                  }}>
+                    {styleGuide}
+                  </pre>
+                </>
+              )}
+            </Spin>
           </Card>
         </Space>
       ),
@@ -906,8 +989,9 @@ export default function NovelDetail() {
               (() => {
                 const ch = chapters.find((c) => c.id === selectedChapterId)
                 if (!ch) return <div>章节不存在</div>
+                const isGenerating = generating === `chapter:${ch.chapter_number}`
                 return (
-                  <>
+                  <Spin spinning={isGenerating} tip="AI 正在生成正文...">
                     <TextArea
                       value={ch.content || ''}
                       onChange={async (e) => {
@@ -943,7 +1027,7 @@ export default function NovelDetail() {
                         </div>
                       </div>
                     )}
-                  </>
+                  </Spin>
                 )
               })()
             ) : (

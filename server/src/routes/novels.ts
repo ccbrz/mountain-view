@@ -65,7 +65,7 @@ router.post('/', authenticate, (req: AuthRequest, res) => {
 })
 
 router.put('/:id', authenticate, (req: AuthRequest, res) => {
-  const { title, content, genre, num_chapters, word_number, guidance, status, llm_config, embedding_config } = req.body
+  const { title, content, genre, num_chapters, word_number, guidance, status, llm_config, embedding_config, style_reference, style_guide } = req.body
   const db = getDB()
   const novel = db.prepare('SELECT * FROM novels WHERE id = ?').get(req.params.id) as any
 
@@ -78,7 +78,8 @@ router.put('/:id', authenticate, (req: AuthRequest, res) => {
   db.prepare(
     `UPDATE novels SET
       title = ?, content = ?, genre = ?, num_chapters = ?, word_number = ?,
-      guidance = ?, status = ?, llm_config = ?, embedding_config = ?, updated_at = CURRENT_TIMESTAMP
+      guidance = ?, status = ?, llm_config = ?, embedding_config = ?, 
+      style_reference = ?, style_guide = ?, updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`
   ).run(
     title ?? novel.title,
@@ -90,6 +91,8 @@ router.put('/:id', authenticate, (req: AuthRequest, res) => {
     status ?? novel.status,
     llm_config ?? novel.llm_config,
     embedding_config ?? novel.embedding_config,
+    style_reference ?? novel.style_reference,
+    style_guide ?? novel.style_guide,
     req.params.id,
   )
   res.json({ message: 'ok' })
