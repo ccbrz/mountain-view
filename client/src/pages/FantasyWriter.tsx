@@ -97,17 +97,17 @@ export default function FantasyWriter() {
   return (
     <>
       <Card style={{ marginBottom: 16 }} bodyStyle={{ padding: '12px 24px' }}>
-        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+        <div className="responsive-search-bar" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <Input
             placeholder="搜索小说标题..."
             prefix={<SearchOutlined />}
-            style={{ width: 320 }}
+            style={{ maxWidth: 320, width: '100%' }}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             allowClear
           />
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>创建小说</Button>
-        </Space>
+        </div>
       </Card>
 
       {loading ? (

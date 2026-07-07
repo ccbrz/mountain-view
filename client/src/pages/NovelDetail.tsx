@@ -860,6 +860,7 @@ export default function NovelDetail() {
       label: <span><FileTextOutlined /> 章节</span>,
       children: (
         <div 
+          className="responsive-editor-panel"
           style={{ display: 'flex', minHeight: '600px', position: 'relative', userSelect: dragging !== null ? 'none' : 'auto' }}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}

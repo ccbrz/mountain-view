@@ -120,6 +120,10 @@ export default function Login() {
           backdrop-filter: blur(10px);
           color: #fff !important;
         }
+        @media (max-width: 576px) {
+          .login-card { margin: 16px !important; }
+          .login-card .ant-card-body { padding: 24px !important; }
+        }
       `}</style>
 
       <div style={{

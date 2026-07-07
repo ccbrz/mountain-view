@@ -19,7 +19,7 @@ export default function MainLayout() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(window.innerWidth < 992)
 
   const isAdmin = user?.role === 'admin'
 
@@ -42,6 +42,9 @@ export default function MainLayout() {
         onCollapse={setCollapsed}
         theme="dark"
         width={220}
+        breakpoint="lg"
+        collapsedWidth={0}
+        trigger={null}
         style={{ borderRight: '1px solid rgba(255,255,255,0.06)' }}
       >
         <div style={{
