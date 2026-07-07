@@ -1,19 +1,22 @@
-FROM node:20-alpine AS build
+FROM node:20-slim AS client-builder
 WORKDIR /app
-COPY package.json ./
-COPY client/package.json client/package-lock.json ./client/
-COPY server/package.json server/package-lock.json ./server/
-RUN npm install --no-cache
-COPY . .
-RUN npm --prefix client run build
-RUN npm --prefix server run build
+COPY client/package.json client/package-lock.json ./
+RUN npm install
+COPY client/ .
+RUN npm run build
 
-FROM node:20-alpine
+FROM node:20-slim AS server-builder
 WORKDIR /app
-COPY --from=build /app/server/dist ./server/dist
-COPY --from=build /app/server/node_modules ./server/node_modules
-COPY --from=build /app/server/package.json ./server/
-COPY --from=build /app/client/dist ./client/dist
-COPY package.json ./
+COPY server/package.json server/package-lock.json ./
+RUN npm install
+COPY server/ .
+RUN npm run build
+
+FROM node:20-slim
+WORKDIR /app
+COPY --from=server-builder /app/dist ./dist
+COPY --from=server-builder /app/node_modules ./node_modules
+COPY --from=server-builder /app/package.json ./
+COPY --from=client-builder /app/dist ./client/dist
 EXPOSE 3001
-CMD ["node", "server/dist/index.js"]
+CMD ["node", "dist/index.js"]

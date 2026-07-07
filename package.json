@@ -2,7 +2,6 @@
   "name": "mountain-view",
   "private": true,
   "scripts": {
-    "postinstall": "npm --prefix client install && npm --prefix server install",
     "dev": "concurrently -n server,client -c blue,green \"npm run dev:server\" \"npm run dev:client\"",
     "dev:client": "npm --prefix client run dev",
     "dev:server": "npm --prefix server run dev",
