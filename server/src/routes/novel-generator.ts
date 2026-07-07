@@ -5,7 +5,7 @@ import { getLLMConfigs, getLLMConfigByName, LLMConfig } from '../llm/config'
 import { invokeWithRetry } from '../llm/invoke'
 import * as P from '../llm/prompts'
 import { getVectorStore } from '../llm/vectorstore'
-import { getLogsByNovelId, clearLogsByNovelId } from '../llm/logstore'
+import { addLLMCallLog, getLogsByNovelId, clearLogsByNovelId } from '../llm/logstore'
 
 const router = Router()
 
@@ -106,6 +106,21 @@ function parseBlueprintChapters(db: any, novelId: number, content: string, fallb
   }
 }
 
+// ---------- RAG debug log helper ----------
+
+function addRAGDebugLog(novelId: number, stage: string, content: string) {
+  addLLMCallLog({
+    novel_id: novelId,
+    task: `rag:${stage}`,
+    model_name: '🔍 RAG',
+    system_prompt: '',
+    user_prompt: content,
+    response: '',
+    duration_ms: 0,
+    status: 'success',
+  })
+}
+
 // ---------- GET /llm-configs ----------
 
 router.get('/:id/llm-configs', authenticate, (_req: AuthRequest, res) => {
@@ -120,9 +135,10 @@ router.get('/:id/llm-configs', authenticate, (_req: AuthRequest, res) => {
   res.json(configs)
 })
 
-// ---------- POST /:id/extract-style ----------
+// ---------- POST /:id/style/guide ----------
+// 上传 txt 文件内容 → AI 总结文风指南 → 保存到 style_guide
 
-router.post('/:id/extract-style', authenticate, async (req: AuthRequest, res) => {
+router.post('/:id/style/guide', authenticate, async (req: AuthRequest, res) => {
   const db = getDB()
   const novel = getNovelOrForbid(db, req.params.id, req)
   if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
@@ -130,41 +146,52 @@ router.post('/:id/extract-style', authenticate, async (req: AuthRequest, res) =>
   const config = getLLMConfigForTask(novel, req, 'architecture')
   if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
 
-  const { style_reference } = req.body
-  if (!style_reference || style_reference.trim().length < 100) {
-    return res.status(400).json({ message: '文风参考内容太短，请至少提供100字以上的范文' })
+  const { content } = req.body
+  if (!content || content.trim().length < 100) {
+    return res.status(400).json({ message: '范文内容太短，请至少提供100字以上的文本' })
   }
 
   try {
     const ctx = { novel_id: novel.id, task: 'extract-style' }
-    
-    // 如果文风参考太长，截取前 15000 字
-    const truncatedReference = style_reference.length > 15000 
-      ? style_reference.slice(0, 15000) + '\n\n[... 内容过长，已截取前 15000 字]'
-      : style_reference
+    const truncated = content.length > 15000
+      ? content.slice(0, 15000) + '\n\n[... 内容过长，已截取前 15000 字]'
+      : content
 
     const styleGuide = await invokeWithRetry(
       config,
       P.SYSTEM_STYLE_EXTRACT,
-      P.USER_STYLE_EXTRACT(truncatedReference),
+      P.USER_STYLE_EXTRACT(truncated),
       3,
       ctx
     )
 
-    // 保存到数据库
-    db.prepare('UPDATE novels SET style_reference = ?, style_guide = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
-      style_reference,
-      styleGuide,
-      novel.id
-    )
+    db.prepare('UPDATE novels SET style_guide = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(styleGuide, novel.id)
 
-    res.json({ 
-      message: '文风提取完成', 
-      style_guide: styleGuide 
-    })
+    res.json({ message: '文风指南提取完成', style_guide: styleGuide })
   } catch (err: any) {
     res.status(500).json({ message: `文风提取失败: ${err.message}` })
   }
+})
+
+// ---------- PUT /:id/style/reference ----------
+// 上传范文片段（≤1000 字）→ 保存到 style_reference，用于 few-shot
+
+router.put('/:id/style/reference', authenticate, async (req: AuthRequest, res) => {
+  const db = getDB()
+  const novel = getNovelOrForbid(db, req.params.id, req)
+  if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
+
+  const { content } = req.body
+  if (!content || content.trim().length === 0) {
+    return res.status(400).json({ message: '内容不能为空' })
+  }
+  if (content.length > 1000) {
+    return res.status(400).json({ message: '范文片段不能超过1000字' })
+  }
+
+  db.prepare('UPDATE novels SET style_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(content, novel.id)
+
+  res.json({ message: '范文片段已保存' })
 })
 
 // ---------- POST /:id/generate/architecture ----------
@@ -304,15 +331,26 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
       }
     }
 
+    // === RAG：从已定稿章节中检索相关上下文 ===
     const vs = getVectorStore(novel.id)
     if (novel.embedding_config) {
       vs.setEmbeddingConfig(novel.embedding_config)
     }
+    addRAGDebugLog(novel.id, '向量库状态', `文档数: ${vs.count()}`)
     if (vs.count() > 0) {
+      // 1. LLM 根据当前章节大纲生成搜索关键词（人物/地点/事件/物品）
       const keywords = await invokeWithRetry(config, P.KNOWLEDGE_SEARCH_KEYWORDS, P.USER_KNOWLEDGE_SEARCH(`当前章节：${chapterNum} - ${chapter.title}\n${outline}`), 3, chapterCtx)
+      addRAGDebugLog(novel.id, '1-搜索关键词', keywords)
+
+      // 2. 向量检索：对关键词做 embedding，余弦相似度取 top-3
       const results = await vs.search(keywords, 3)
       if (results.length > 0) {
-        // 知识过滤：三级过滤（冲突检测、价值评估、结构重组）
+        const searchDetail = results.map((r, i) =>
+          `[结果 ${i + 1}] (相似度: ${(r.score * 100).toFixed(1)}%)\n${r.text}`
+        ).join('\n\n---\n\n')
+        addRAGDebugLog(novel.id, '2-检索结果', searchDetail)
+
+        // 3. 知识过滤：LLM 对检索结果做三级过滤（冲突检测、价值评估、结构重组）
         const rawContext = results.map((r) => r.text).join('\n---\n')
         try {
           const filteredContext = await invokeWithRetry(
@@ -323,28 +361,41 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
             chapterCtx
           )
           context += '\n=== 相关上下文（已过滤）===\n' + filteredContext + '\n'
+          addRAGDebugLog(novel.id, '3-过滤后上下文', filteredContext)
         } catch (filterErr) {
-          // 过滤失败，使用原始内容
           context += '\n=== 相关上下文（向量检索）===\n' + rawContext + '\n'
+          addRAGDebugLog(novel.id, '3-过滤失败（使用原始内容）', rawContext)
         }
+      } else {
+        addRAGDebugLog(novel.id, '2-检索结果', '未检索到相关内容')
       }
+    } else {
+      addRAGDebugLog(novel.id, '1-搜索关键词', '向量库为空，跳过检索')
     }
 
     const contentBeforeDraft = chapter.content || ''
     db.prepare('UPDATE novel_chapters SET content_before_draft = ? WHERE id = ?').run(contentBeforeDraft, chapter.id)
 
-    // 注入文风指南
+    // 注入文风指南（AI 总结的结构化风格特征 → system prompt）
     const styleGuide = novel.style_guide || ''
     const styleGuideSection = styleGuide 
       ? `\n【文风要求】\n请严格模仿以下文风特征进行写作：\n${styleGuide}` 
+      : ''
+
+    // 注入范文片段（few-shot 展示 → user prompt）
+    const styleRef = novel.style_reference || ''
+    const styleRefSection = styleRef
+      ? `\n\n=== 文风参考（请模仿以下范文的风格来撰写本章）===\n${styleRef}`
       : ''
 
     const isFirst = chapterNum === 1
     const baseSystemPrompt = isFirst ? P.SYSTEM_FIRST_CHAPTER : P.SYSTEM_CHAPTER_DRAFT
     const systemPrompt = baseSystemPrompt.replace('{styleGuide}', styleGuideSection)
     const userPrompt = isFirst
-      ? P.USER_FIRST_CHAPTER(context)
-      : P.USER_CHAPTER_DRAFT(`当前是第 ${chapterNum} 章：${chapter.title}\n\n${context}`)
+      ? P.USER_FIRST_CHAPTER(context + styleRefSection)
+      : P.USER_CHAPTER_DRAFT(`当前是第 ${chapterNum} 章：${chapter.title}\n\n${context}${styleRefSection}`)
+
+    addRAGDebugLog(novel.id, '4-最终生成上下文', userPrompt)
 
     const content = await invokeWithRetry(config, systemPrompt, userPrompt, 3, chapterCtx)
     let finalContent = content
@@ -426,89 +477,6 @@ router.post('/:id/generate/finalize/:num', authenticate, async (req: AuthRequest
   }
 })
 
-// ---------- POST /:id/generate/batch ----------
-
-router.post('/:id/generate/batch', authenticate, async (req: AuthRequest, res) => {
-  const db = getDB()
-  const novel = getNovelOrForbid(db, req.params.id, req)
-  if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
-
-  const config = getLLMConfigForTask(novel, req, 'chapter')
-  if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
-
-  saveLLMConfig(db, novel.id, req, 'chapter')
-
-  const total = novel.num_chapters || 10
-  const results: { chapter: number; status: string; word_count?: number }[] = []
-
-  try {
-    for (let i = 1; i <= total; i++) {
-      // check if already done
-      const ch = db.prepare('SELECT * FROM novel_chapters WHERE novel_id = ? AND chapter_number = ?').get(novel.id, i) as any
-      if (ch?.content) {
-        results.push({ chapter: i, status: 'skipped' })
-        continue
-      }
-
-      // generate
-      const genReq = { ...req, params: { ...req.params, num: String(i) }, body: { ...req.body, llm_config: config.name } }
-      const genRes: any = { json: () => {} }
-      // we need to call the generation logic inline instead of via HTTP
-      // Let's do it manually
-      try {
-        if (!ch) {
-          db.prepare('INSERT INTO novel_chapters (novel_id, chapter_number, title) VALUES (?, ?, ?)').run(novel.id, i, `第${i}章`)
-        }
-        const chapterData = db.prepare('SELECT * FROM novel_chapters WHERE novel_id = ? AND chapter_number = ?').get(novel.id, i) as any
-
-        const architecture = getDoc(db, novel.id, 'architecture')
-        const blueprint = getDoc(db, novel.id, 'blueprint')
-        const summary = getDoc(db, novel.id, 'summary')
-        const charState = getDoc(db, novel.id, 'characters')
-
-        const batchCtx = { novel_id: novel.id, task: `batch:${i}` }
-        let context = `=== 小说架构 ===\n${architecture}\n\n=== 章节蓝图 ===\n${blueprint}\n`
-        if (summary) context += `\n=== 全局摘要 ===\n${summary}\n`
-        if (charState) context += `\n=== 角色状态 ===\n${charState}\n`
-
-        const vs = getVectorStore(novel.id)
-        if (novel.embedding_config) {
-          vs.setEmbeddingConfig(novel.embedding_config)
-        }
-        if (vs.count() > 0) {
-          const keywords = await invokeWithRetry(config, P.KNOWLEDGE_SEARCH_KEYWORDS, P.USER_KNOWLEDGE_SEARCH(`当前章节：第${i}章\n${blueprint}`), 3, batchCtx)
-          const searchResults = await vs.search(keywords, 3)
-          if (searchResults.length > 0) {
-            context += '\n=== 相关上下文 ===\n'
-            context += searchResults.map((r) => r.text).join('\n---\n')
-          }
-        }
-
-        const isFirst = i === 1
-        const systemPrompt = isFirst ? P.SYSTEM_FIRST_CHAPTER : P.SYSTEM_CHAPTER_DRAFT
-        const userPrompt = isFirst
-          ? P.USER_FIRST_CHAPTER(context)
-          : P.USER_CHAPTER_DRAFT(`当前是第 ${i} 章\n\n${context}`)
-
-        const content = await invokeWithRetry(config, systemPrompt, userPrompt, 3, batchCtx)
-        const wc = content.replace(/\s/g, '').length
-        db.prepare('UPDATE novel_chapters SET content = ?, word_count = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
-          content, wc, 'draft', chapterData.id
-        )
-
-        results.push({ chapter: i, status: 'generated', word_count: wc })
-      } catch (err: any) {
-        results.push({ chapter: i, status: `error: ${err.message}` })
-      }
-    }
-
-    updateNovelStatus(db, novel.id, 'completed')
-    res.json({ message: '批量生成完成', results })
-  } catch (err: any) {
-    res.status(500).json({ message: `批量生成失败: ${err.message}` })
-  }
-})
-
 // ---------- doc/chapter CRUD ----------
 
 router.get('/:id/docs', authenticate, (req: AuthRequest, res) => {
@@ -538,7 +506,7 @@ router.get('/:id/chapters', authenticate, (req: AuthRequest, res) => {
   const db = getDB()
   const novel = getNovelOrForbid(db, req.params.id, req)
   if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
-  const chapters = db.prepare('SELECT id, chapter_number, title, outline, status, word_count, updated_at FROM novel_chapters WHERE novel_id = ? ORDER BY chapter_number').all(novel.id)
+    const chapters = db.prepare('SELECT id, chapter_number, title, outline, content, status, word_count, updated_at FROM novel_chapters WHERE novel_id = ? ORDER BY chapter_number').all(novel.id)
   res.json(chapters)
 })
 

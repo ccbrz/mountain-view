@@ -4,12 +4,14 @@ import {
   Tabs, Card, Form, Input, InputNumber, Select, Button,
   Modal, message, Spin, Space, Typography, Tag,
   Table, Popconfirm, Divider, Badge, Slider, Drawer, Collapse,
+  Upload,
 } from 'antd'
 import {
   ArrowLeftOutlined, SettingOutlined, BookOutlined, OrderedListOutlined,
   FileTextOutlined, TeamOutlined, CompressOutlined, ThunderboltOutlined,
   PlayCircleOutlined, PlusOutlined, EditOutlined, DeleteOutlined,
   ApiOutlined, BugOutlined, ClearOutlined, ReloadOutlined,
+  UploadOutlined,
 } from '@ant-design/icons'
 import api from '../api'
 import { useAuth } from '../context/AuthContext'
@@ -34,6 +36,7 @@ interface Chapter {
   chapter_number: number
   title: string
   outline: string
+  content: string
   status: string
   word_count: number
   updated_at: string
@@ -94,9 +97,9 @@ export default function NovelDetail() {
   const [architectureInput, setArchitectureInput] = useState('')
   const [savingInput, setSavingInput] = useState(false)
 
-  // style reference
-  const [styleReference, setStyleReference] = useState('')
+  // style
   const [styleGuide, setStyleGuide] = useState('')
+  const [styleGuideInput, setStyleGuideInput] = useState('')
   const [extractingStyle, setExtractingStyle] = useState(false)
 
   // consistency check
@@ -188,7 +191,7 @@ export default function NovelDetail() {
       }
       setTaskConfigs(saved)
       setEmbeddingConfig(n.data.embedding_config || '')
-      setStyleReference(n.data.style_reference || '')
+      setStyleRefText(n.data.style_reference || '')
       setStyleGuide(n.data.style_guide || '')
       settingsForm.setFieldsValue(n.data)
     }).catch(() => message.error('加载小说失败'))
@@ -264,29 +267,51 @@ export default function NovelDetail() {
     }
   }
 
-  const extractStyle = async () => {
-    if (!styleReference || styleReference.trim().length < 100) {
-      message.error('文风参考内容太短，请至少提供100字以上的范文')
-      return
+  const extractStyleGuide = async (text: string) => {
+    if (!text || text.trim().length < 100) {
+      message.error('范文内容太短，请至少提供100字以上的文本')
+      return false
     }
     if (!taskConfigs.architecture) {
       message.error('请先在 LLM 配置中选择架构模型')
-      return
+      return false
     }
     setExtractingStyle(true)
     try {
-      const res = await api.post(`/novels/${id}/extract-style`, {
-        style_reference: styleReference,
+      const res = await api.post(`/novels/${id}/style/guide`, {
+        content: text,
         llm_config: taskConfigs.architecture
       })
       setStyleGuide(res.data.style_guide)
-      message.success('文风提取完成')
+      message.success('文风指南提取完成')
+      return true
     } catch (err: any) {
       message.error('文风提取失败: ' + (err.response?.data?.message || err.message))
+      return false
     } finally {
       setExtractingStyle(false)
     }
   }
+
+  const saveStyleReference = async (text: string) => {
+    if (!text || text.trim().length === 0) {
+      message.error('内容不能为空')
+      return
+    }
+    if (text.length > 1000) {
+      message.error('范文片段不能超过1000字')
+      return
+    }
+    try {
+      await api.put(`/novels/${id}/style/reference`, { content: text })
+      message.success('范文片段已保存')
+    } catch (err: any) {
+      message.error('保存失败: ' + (err.response?.data?.message || err.message))
+    }
+  }
+
+  const [styleRefText, setStyleRefText] = useState('')
+  const [savingStyleRef, setSavingStyleRef] = useState(false)
 
   const handleTaskConfigChange = async (task: string, configName: string) => {
     const next = { ...taskConfigs, [task]: configName }
@@ -306,7 +331,6 @@ export default function NovelDetail() {
   const taskForAction = (action: string): string => {
     if (action === 'architecture') return 'architecture'
     if (action === 'blueprint') return 'blueprint'
-    if (action === 'batch') return 'chapter'
     if (action === 'finalize') return 'finalize'
     return 'chapter'
   }
@@ -318,7 +342,7 @@ export default function NovelDetail() {
     const cfg = allConfigs.find((c) => c.name === cfgName)
     if (!cfg?.api_key) return message.error(`"${cfgName}" 未配置 API Key`)
 
-    setGenerating(extra || action)
+    setGenerating(extra ? `${action}:${extra}` : action)
     try {
       await api.put(`/novels/${id}`, { llm_config: JSON.stringify(taskConfigs) })
 
@@ -600,14 +624,7 @@ export default function NovelDetail() {
               >
                 生成蓝图
               </Button>
-              <Button
-                icon={<PlayCircleOutlined />}
-                loading={generating === 'batch'}
-                onClick={() => callGenerate('batch')}
-                disabled={!taskConfigs.chapter || !docs.blueprint}
-              >
-                批量生成全部章节
-              </Button>
+
             </Space>
           </Form>
         </Card>
@@ -649,7 +666,7 @@ export default function NovelDetail() {
             ))}
           </Card>
 
-          <Card title="Embedding 配置" help="用于向量检索，提升章节间上下文关联的准确性">
+          <Card title="Embedding 配置">
             <Form.Item label="Embedding 模型" help="终稿章节时会调用此模型生成向量，用于后续章节的语义检索" style={{ marginBottom: 0 }}>
               <Select
                 value={embeddingConfig}
@@ -709,36 +726,61 @@ export default function NovelDetail() {
               />
             </Spin>
           </Card>
-
+        </Space>
+      ),
+    },
+    {
+      key: 'style',
+      label: <span><FileTextOutlined /> 文风</span>,
+      children: (
+        <Space direction="vertical" style={{ width: '100%' }} size="large">
           <Card
-            title="文风参考"
+            title="上传范文 → 提取文风指南"
             extra={
-              <Space>
-                <Button
-                  loading={extractingStyle}
-                  onClick={extractStyle}
-                  disabled={!styleReference || styleReference.trim().length < 100}
-                >
-                  提取文风
-                </Button>
-              </Space>
+              <Button
+                loading={extractingStyle}
+                onClick={() => extractStyleGuide(styleGuideInput)}
+                disabled={extractingStyle}
+              >
+                {extractingStyle ? '提取中...' : '提取文风指南'}
+              </Button>
             }
           >
             <Spin spinning={extractingStyle} tip="AI 正在分析文风特征...">
               <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>
-                粘贴你喜欢的范文片段（建议 500 字以上），AI 会提取其写作风格并应用到后续章节生成中：
+                上传一个或多个 .txt 文件，AI 会自动提取其写作风格特征：
               </div>
+              <Upload
+                accept=".txt"
+                multiple
+                beforeUpload={(file) => {
+                  const reader = new FileReader()
+                  reader.onload = (e) => {
+                    const buffer = e.target?.result as ArrayBuffer
+                    const utf8Text = new TextDecoder('utf-8', { fatal: false }).decode(buffer)
+                    const text = utf8Text.includes('\uFFFD')
+                      ? new TextDecoder('gbk', { fatal: false }).decode(buffer)
+                      : utf8Text
+                    setStyleGuideInput((prev) => prev ? prev + '\n\n---\n\n' + text : text)
+                  }
+                  reader.readAsArrayBuffer(file)
+                  return false
+                }}
+                showUploadList={false}
+              >
+                <Button icon={<UploadOutlined />}>选择 .txt 文件</Button>
+              </Upload>
               <TextArea
-                value={styleReference}
-                onChange={(e) => setStyleReference(e.target.value)}
+                value={styleGuideInput}
+                onChange={(e) => setStyleGuideInput(e.target.value)}
                 rows={8}
-                placeholder="在此粘贴你喜欢的文风参考范文...&#10;&#10;例如：&#10;月光如水，洒在青石板上。她静静地站在那里，像一幅被时光定格的画。风掠过她的发梢，带来远处桂花的清香。这一刻，世界仿佛静止了，只剩下她微微颤抖的睫毛，和那欲言又止的唇..."
-                style={{ fontFamily: 'serif', fontSize: 14 }}
+                placeholder="拖入或选择 .txt 文件后内容会出现在这里，点击「提取文风指南」按钮由 AI 分析...&#10;&#10;你也可以直接粘贴范文内容"
+                style={{ fontFamily: 'inherit', fontSize: 14, marginTop: 12 }}
               />
               {styleGuide && (
                 <>
                   <Divider style={{ margin: '16px 0' }}>
-                    <span style={{ color: '#52c41a' }}>✓ 已提取的文风指南</span>
+                    <span style={{ color: '#52c41a' }}>✓ 已提取的文风指南（注入 System Prompt）</span>
                   </Divider>
                   <pre style={{
                     whiteSpace: 'pre-wrap',
@@ -758,6 +800,36 @@ export default function NovelDetail() {
                 </>
               )}
             </Spin>
+          </Card>
+
+          <Card
+            title="范文片段（Few-shot）"
+            extra={
+              <Button
+                loading={savingStyleRef}
+                onClick={async () => {
+                  setSavingStyleRef(true)
+                  await saveStyleReference(styleRefText)
+                  setSavingStyleRef(false)
+                }}
+                disabled={!styleRefText || styleRefText.length > 1000}
+              >
+                保存
+              </Button>
+            }
+          >
+            <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>
+              粘贴一段范文原文（1000 字以内），生成章节时会直接注入 User Prompt 末尾作为 few-shot 示范：
+            </div>
+            <TextArea
+              value={styleRefText}
+              onChange={(e) => setStyleRefText(e.target.value)}
+              rows={6}
+              maxLength={1000}
+              showCount
+              placeholder="在此粘贴范文原文片段（不超过 1000 字）..."
+              style={{ fontFamily: 'serif', fontSize: 14 }}
+            />
           </Card>
         </Space>
       ),

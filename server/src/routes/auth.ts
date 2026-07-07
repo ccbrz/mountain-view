@@ -3,9 +3,9 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { getDB } from '../db'
 import { authenticate, AuthRequest } from '../middleware/auth'
+import { JWT_SECRET } from '../config'
 
 const router = Router()
-const JWT_SECRET = process.env.JWT_SECRET || 'mountain-view-secret-key'
 
 router.post('/login', async (req, res) => {
   const { username, password } = req.body

@@ -6,8 +6,15 @@ const router = Router()
 
 router.get('/', authenticate, (_req: AuthRequest, res) => {
   const db = getDB()
-  const configs = db.prepare('SELECT * FROM llm_configs ORDER BY name').all()
+  const configs = db.prepare('SELECT id, name, interface_format, base_url, model_name, temperature, max_tokens, timeout, created_by, created_at, updated_at FROM llm_configs ORDER BY name').all()
   res.json(configs)
+})
+
+router.get('/:id', authenticate, (req: AuthRequest, res) => {
+  const db = getDB()
+  const config = db.prepare('SELECT * FROM llm_configs WHERE id = ?').get(req.params.id) as any
+  if (!config) return res.status(404).json({ message: '配置不存在' })
+  res.json(config)
 })
 
 router.post('/', authenticate, (req: AuthRequest, res) => {

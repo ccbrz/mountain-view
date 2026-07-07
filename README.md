@@ -62,17 +62,29 @@ npm start        # 启动后端，自动托管前端静态文件
 
 在根目录创建 `.env` 文件：
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `PORT` | 后端端口 | `3001` |
-| `NODE_ENV` | 运行环境 | 无 |
-| `JWT_SECRET` | JWT 签名密钥 | `mountain-view-secret-key` |
-| `DB_PATH` | SQLite 数据库路径 | `data/app.db` |
+| 变量 | 说明 | 默认值 | 必需 |
+|------|------|--------|------|
+| `PORT` | 后端端口 | `3001` | 否 |
+| `NODE_ENV` | 运行环境 (`production` / `development`) | 无 | 否 |
+| `JWT_SECRET` | JWT 签名密钥 | **必填，无默认值** | **是** |
+| `DB_PATH` | SQLite 数据库路径 | `data/app.db` | 否 |
+| `ALLOWED_ORIGINS` | 允许的 CORS 域名，多个用逗号分隔 | 生产环境无默认值 | 否 |
+
+> `JWT_SECRET` **必须设置**，缺失时服务启动会报错退出。
 
 ## 部署
 
 项目已配置 Railway 部署（`railway.json`），推送代码后在 Railway 关联仓库即可自动部署。
 
-注意：
-- 需在 Railway 设置 `JWT_SECRET` 环境变量
-- 需挂载持久化 Volume 到 `data/` 目录，否则重启丢失数据
+### Railway 部署注意事项
+
+- **必须设置环境变量** `JWT_SECRET`
+- 建议设置 `NODE_ENV=production`
+- **必须挂载持久化 Volume** 到 `data/` 目录（SQLite 数据库），否则每次重启数据会丢失
+- 可选：`ALLOWED_ORIGINS` 如不设置，生产环境默认拒绝所有跨域请求
+
+### 首次部署后
+
+1. 在 Railway Dashboard 打开项目 Shell，运行 `npm run db:seed` 初始化数据库
+2. 默认账户：`admin` / `950711`
+3. 建议首次登录后立即修改默认密码
