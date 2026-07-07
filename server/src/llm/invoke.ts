@@ -7,6 +7,15 @@ export interface InvokeContext {
   task: string
 }
 
+function estimateTokens(text: string): number {
+  let chinese = 0, english = 0
+  for (const ch of text) {
+    if (ch >= '\u4e00' && ch <= '\u9fff') chinese++
+    else if (ch.match(/[a-zA-Z0-9]/)) english++
+  }
+  return Math.ceil(chinese / 1.5 + english / 4 + (text.length - chinese - english) * 0.25)
+}
+
 export async function invokeWithRetry(
   config: LLMConfig,
   system: string,
@@ -18,6 +27,7 @@ export async function invokeWithRetry(
   const startTime = Date.now()
   let logId: string | undefined
 
+  const inputTokens = estimateTokens(system) + estimateTokens(user)
   if (context) {
     logId = addLLMCallLog({
       novel_id: context.novel_id,
@@ -27,6 +37,7 @@ export async function invokeWithRetry(
       user_prompt: user,
       response: '',
       duration_ms: 0,
+      input_tokens: inputTokens,
       status: 'pending',
     })
   }
@@ -39,6 +50,8 @@ export async function invokeWithRetry(
         updateLLMCallLog(logId, {
           response: text,
           duration_ms: Date.now() - startTime,
+          input_tokens: inputTokens,
+          output_tokens: estimateTokens(text),
           status: 'success',
         })
       }

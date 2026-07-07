@@ -9,6 +9,8 @@ import novelRoutes from './routes/novels'
 import novelGeneratorRoutes from './routes/novel-generator'
 import llmConfigRoutes from './routes/llm-configs'
 import { initSchema } from './schema'
+import { initLogStore } from './llm/logstore'
+import { initVectorStore } from './llm/vectorstore'
 import { isProduction, getAllowedOrigins } from './config'
 
 const app = express()
@@ -50,6 +52,8 @@ if (isProduction()) {
 }
 
 initSchema()
+initLogStore()
+initVectorStore()
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`)

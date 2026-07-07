@@ -1,5 +1,9 @@
 import { getDB } from './db'
 
+export function initTable(name: string, columns: string) {
+  getDB().exec(`CREATE TABLE IF NOT EXISTS ${name} (${columns})`)
+}
+
 export function initSchema() {
   const db = getDB()
 

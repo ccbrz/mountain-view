@@ -1,178 +1,116 @@
-import fs from 'fs'
-import path from 'path'
+import { getDB } from '../db'
+import { initTable } from '../schema'
 import { getLLMConfigByName } from './config'
 
-interface VectorDoc {
-  id: string
-  text: string
-  metadata: Record<string, string | number>
-  embedding: number[]
+export function initVectorStore() {
+  initTable('vector_embeddings', `
+    id TEXT PRIMARY KEY,
+    novel_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    metadata_json TEXT DEFAULT '{}',
+    embedding BLOB,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  `)
+  getDB().exec(`CREATE INDEX IF NOT EXISTS idx_vectors_novel ON vector_embeddings(novel_id)`)
 }
 
-interface VectorStoreData {
-  docs: VectorDoc[]
-}
-
-const VECTOR_DIR = path.join(process.cwd(), 'data', 'vectors')
-
-// 确保向量存储目录存在
-function ensureVectorDir() {
-  if (!fs.existsSync(VECTOR_DIR)) {
-    fs.mkdirSync(VECTOR_DIR, { recursive: true })
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0
+  let dot = 0, na = 0, nb = 0
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i]
+    na += a[i] * a[i]
+    nb += b[i] * b[i]
   }
+  const d = Math.sqrt(na) * Math.sqrt(nb)
+  return d === 0 ? 0 : dot / d
 }
 
-function getVectorPath(novelId: string | number): string {
-  return path.join(VECTOR_DIR, `novel_${novelId}.json`)
+function packEmbedding(vec: number[]): Buffer {
+  const buf = Buffer.alloc(vec.length * 4)
+  for (let i = 0; i < vec.length; i++) buf.writeFloatLE(vec[i], i * 4)
+  return buf
 }
 
-export class MemoryVectorStore {
+function unpackEmbedding(buf: Buffer): number[] {
+  const vec: number[] = []
+  for (let i = 0; i < buf.length; i += 4) vec.push(buf.readFloatLE(i))
+  return vec
+}
+
+export class PersistentVectorStore {
   private novelId: string
-  private docs: VectorDoc[] = []
   private embeddingConfigName: string = ''
 
   constructor(novelId: string | number) {
     this.novelId = String(novelId)
-    ensureVectorDir()
-    this.load()
   }
 
   setEmbeddingConfig(configName: string) {
     this.embeddingConfigName = configName
   }
 
-  private load() {
-    const filePath = getVectorPath(this.novelId)
-    if (fs.existsSync(filePath)) {
-      try {
-        const data: VectorStoreData = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
-        this.docs = data.docs || []
-      } catch (err) {
-        console.error('Failed to load vector store:', err)
-        this.docs = []
-      }
-    }
-  }
-
-  private save() {
-    const filePath = getVectorPath(this.novelId)
-    const data: VectorStoreData = { docs: this.docs }
-    fs.writeFileSync(filePath, JSON.stringify(data), 'utf-8')
-  }
-
   private async getEmbedding(text: string): Promise<number[]> {
-    if (!this.embeddingConfigName) {
-      throw new Error('Embedding config not set')
-    }
-
+    if (!this.embeddingConfigName) throw new Error('Embedding config not set')
     const config = getLLMConfigByName(this.embeddingConfigName)
-    if (!config) {
-      throw new Error(`Embedding config "${this.embeddingConfigName}" not found`)
-    }
+    if (!config) throw new Error(`Embedding config "${this.embeddingConfigName}" not found`)
 
-    const url = `${config.base_url}/embeddings`
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    }
-    if (config.api_key) {
-      headers['Authorization'] = `Bearer ${config.api_key}`
-    }
-
-    const body = {
-      model: config.model_name,
-      input: text,
-    }
-
-    const res = await fetch(url, {
+    const res = await fetch(`${config.base_url}/embeddings`, {
       method: 'POST',
-      headers,
-      body: JSON.stringify(body),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.api_key ? { 'Authorization': `Bearer ${config.api_key}` } : {}),
+      },
+      body: JSON.stringify({ model: config.model_name, input: text }),
     })
-
-    if (!res.ok) {
-      const text = await res.text()
-      throw new Error(`Embedding API error ${res.status}: ${text}`)
-    }
-
+    if (!res.ok) throw new Error(`Embedding API error ${res.status}: ${await res.text()}`)
     const data: any = await res.json()
     return data.data[0].embedding
   }
 
   async insert(text: string, metadata: Record<string, string | number>): Promise<void> {
     const embedding = await this.getEmbedding(text)
-    this.docs.push({
-      id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      text,
-      metadata,
-      embedding,
-    })
-    this.save()
+    const db = getDB()
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    db.prepare(
+      'INSERT INTO vector_embeddings (id, novel_id, text, metadata_json, embedding) VALUES (?, ?, ?, ?, ?)'
+    ).run(id, this.novelId, text, JSON.stringify(metadata), packEmbedding(embedding))
   }
 
   async search(query: string, k = 4): Promise<{ text: string; metadata: Record<string, string | number>; score: number }[]> {
-    if (this.docs.length === 0) return []
+    const db = getDB()
+    const rows = db.prepare('SELECT text, metadata_json, embedding FROM vector_embeddings WHERE novel_id = ?').all(this.novelId) as any[]
+    if (rows.length === 0) return []
 
     const queryEmbedding = await this.getEmbedding(query)
-
-    const scored = this.docs.map((doc) => ({
-      text: doc.text,
-      metadata: doc.metadata,
-      score: cosineSimilarity(queryEmbedding, doc.embedding),
+    const scored = rows.map((r) => ({
+      text: r.text,
+      metadata: JSON.parse(r.metadata_json || '{}'),
+      score: cosineSimilarity(queryEmbedding, unpackEmbedding(r.embedding)),
     }))
-
     scored.sort((a, b) => b.score - a.score)
     return scored.slice(0, k)
   }
 
   clear(): void {
-    this.docs = []
-    this.save()
+    getDB().prepare('DELETE FROM vector_embeddings WHERE novel_id = ?').run(this.novelId)
   }
 
   count(): number {
-    return this.docs.length
+    const row = getDB().prepare('SELECT COUNT(*) as c FROM vector_embeddings WHERE novel_id = ?').get(this.novelId) as any
+    return row?.c || 0
   }
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) return 0
+const stores = new Map<string, PersistentVectorStore>()
 
-  let dotProduct = 0
-  let normA = 0
-  let normB = 0
-
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
-  }
-
-  const denominator = Math.sqrt(normA) * Math.sqrt(normB)
-  if (denominator === 0) return 0
-
-  return dotProduct / denominator
-}
-
-const stores = new Map<string, MemoryVectorStore>()
-
-export function getVectorStore(novelId: string | number): MemoryVectorStore {
+export function getVectorStore(novelId: string | number): PersistentVectorStore {
   const key = String(novelId)
-  if (!stores.has(key)) {
-    stores.set(key, new MemoryVectorStore(novelId))
-  }
+  if (!stores.has(key)) stores.set(key, new PersistentVectorStore(novelId))
   return stores.get(key)!
 }
 
 export function clearVectorStore(novelId: string | number): void {
-  const store = stores.get(String(novelId))
-  if (store) {
-    store.clear()
-  }
   stores.delete(String(novelId))
-  
-  // 删除持久化文件
-  const filePath = getVectorPath(novelId)
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath)
-  }
+  getDB().prepare('DELETE FROM vector_embeddings WHERE novel_id = ?').run(String(novelId))
 }
