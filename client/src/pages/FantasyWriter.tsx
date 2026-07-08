@@ -89,7 +89,6 @@ export default function FantasyWriter() {
   const statusColors: Record<string, string> = {
     created: 'default',
     architecture_done: 'blue',
-    blueprint_done: 'cyan',
     in_progress: 'processing',
     completed: 'success',
   }

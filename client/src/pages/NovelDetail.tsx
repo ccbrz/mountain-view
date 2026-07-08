@@ -58,7 +58,6 @@ interface LLMCallLog {
 
 const TASK_LABELS: Record<string, { label: string; desc: string }> = {
   architecture: { label: '架构模型', desc: '核心种子 / 角色 / 世界观 / 情节' },
-  blueprint: { label: '蓝图模型', desc: '生成章节大纲' },
   chapter: { label: '起草模型', desc: '逐章正文生成（调用最频繁）' },
   finalize: { label: '终稿模型', desc: '更新摘要 / 角色状态' },
   consistency: { label: '审校模型', desc: '一致性检查' },
@@ -331,7 +330,6 @@ export default function NovelDetail() {
 
   const taskForAction = (action: string): string => {
     if (action === 'architecture') return 'architecture'
-    if (action === 'blueprint') return 'blueprint'
     if (action === 'finalize') return 'finalize'
     return 'chapter'
   }
@@ -374,7 +372,7 @@ export default function NovelDetail() {
   const openDocEditor = (type: string) => {
     setDocModalType(type)
     const labels: Record<string, string> = {
-      architecture: '小说架构', blueprint: '章节蓝图',
+      architecture: '小说架构',
       characters: '角色状态', summary: '全局摘要',
     }
     setDocModalContent(docs[type] || `（${labels[type] || type} 尚未生成）`)
@@ -615,18 +613,7 @@ export default function NovelDetail() {
               <TextArea rows={3} placeholder="对故事风格、内容走向的额外要求..." />
             </Form.Item>
 
-            <Space>
-              <Button type="primary" onClick={saveSettings}>保存设置</Button>
-              <Button
-                icon={<OrderedListOutlined />}
-                loading={generating === 'blueprint'}
-                onClick={() => callGenerate('blueprint')}
-                disabled={!taskConfigs.blueprint || !docs.architecture}
-              >
-                生成蓝图
-              </Button>
-
-            </Space>
+            <Button type="primary" onClick={saveSettings}>保存设置</Button>
           </Form>
         </Card>
       ),

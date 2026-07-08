@@ -20,7 +20,7 @@ function getNovelOrForbid(db: any, id: string, req: AuthRequest) {
   return novel
 }
 
-const TASKS = ['architecture', 'blueprint', 'chapter', 'finalize', 'consistency', 'rerank'] as const
+const TASKS = ['architecture', 'chapter', 'finalize', 'consistency', 'rerank'] as const
 type TaskType = typeof TASKS[number]
 
 function getLLMConfigForTask(novel: any, req: AuthRequest, task: TaskType): LLMConfig | null {
@@ -80,30 +80,6 @@ function getDoc(db: any, novelId: number, docType: string): string {
 
 function updateNovelStatus(db: any, novelId: number, status: string) {
   db.prepare('UPDATE novels SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, novelId)
-}
-
-function parseBlueprintChapters(db: any, novelId: number, content: string, fallbackCount: number) {
-  const lines = content.split('\n')
-  let chapterNum = 0
-  for (const line of lines) {
-    const m = line.match(/^(?:第\s*)?(\d+)\s*(?:章|节)?[.、．\s]*\s*(.+)$/)
-    if (m) {
-      chapterNum++
-      const title = m[2].trim()
-      const existing = db.prepare('SELECT id FROM novel_chapters WHERE novel_id = ? AND chapter_number = ?').get(novelId, chapterNum)
-      if (!existing) {
-        db.prepare('INSERT INTO novel_chapters (novel_id, chapter_number, title) VALUES (?, ?, ?)').run(novelId, chapterNum, title)
-      }
-    }
-  }
-  if (chapterNum === 0) {
-    for (let i = 1; i <= fallbackCount; i++) {
-      const existing = db.prepare('SELECT id FROM novel_chapters WHERE novel_id = ? AND chapter_number = ?').get(novelId, i)
-      if (!existing) {
-        db.prepare('INSERT INTO novel_chapters (novel_id, chapter_number, title) VALUES (?, ?, ?)').run(novelId, i, `第${i}章`)
-      }
-    }
-  }
 }
 
 // ---------- RAG debug log helper ----------
@@ -242,34 +218,6 @@ router.post('/:id/generate/architecture', authenticate, async (req: AuthRequest,
     res.json({ message: '架构生成完成', results })
   } catch (err: any) {
     res.status(500).json({ message: `架构生成失败: ${err.message}` })
-  }
-})
-
-// ---------- POST /:id/generate/blueprint ----------
-
-router.post('/:id/generate/blueprint', authenticate, async (req: AuthRequest, res) => {
-  const db = getDB()
-  const novel = getNovelOrForbid(db, req.params.id, req)
-  if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
-
-  const config = getLLMConfigForTask(novel, req, 'blueprint')
-  if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
-
-  saveLLMConfig(db, novel.id, req, 'blueprint')
-
-  const architecture = getDoc(db, novel.id, 'architecture')
-  if (!architecture) return res.status(400).json({ message: '请先生成小说架构' })
-
-  try {
-    const ctx = { novel_id: novel.id, task: 'blueprint' }
-    const content = await invokeWithRetry(config, P.SYSTEM_CHAPTER_BLUEPRINT, P.USER_CHAPTER_BLUEPRINT(architecture, novel.num_chapters || 10), 3, ctx)
-    saveDoc(db, novel.id, 'blueprint', content)
-    parseBlueprintChapters(db, novel.id, content, novel.num_chapters || 10)
-    updateNovelStatus(db, novel.id, 'blueprint_done')
-
-    res.json({ message: '蓝图生成完成', content })
-  } catch (err: any) {
-    res.status(500).json({ message: `蓝图生成失败: ${err.message}` })
   }
 })
 
@@ -504,11 +452,6 @@ router.put('/:id/docs/:type', authenticate, (req: AuthRequest, res) => {
   const novel = getNovelOrForbid(db, req.params.id, req)
   if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
   saveDoc(db, novel.id, req.params.type, req.body.content || '')
-
-  if (req.params.type === 'blueprint') {
-    parseBlueprintChapters(db, novel.id, req.body.content || '', novel.num_chapters || 10)
-  }
-
   res.json({ message: 'ok' })
 })
 

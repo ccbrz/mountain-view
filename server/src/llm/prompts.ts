@@ -37,19 +37,6 @@ export const SYSTEM_PLOT_ARCHITECTURE = `你是一位专业的情节架构师。
 
 每个情节点请包含：场景简述、涉及角色、情感张力`
 
-export const SYSTEM_CHAPTER_BLUEPRINT = `你是一位专业的小说章节规划师。请根据已有的故事架构，生成详细的章节蓝图。
-
-每个章节请包含：
-- 章节标题
-- 章节角色（在本章中起什么作用：推进/转折/揭示/铺垫/高潮/收束）
-- 章节目的（本章要达成什么叙事目标）
-- 悬念密度（渐进/紧凑/爆发）
-- 伏笔埋设（埋设什么伏笔，为后续做什么准备）
-- 转折强度（★~★★★★★）
-- 章节摘要（1-2句话）
-
-注意：章节之间要有起承转合，前呼后应。`
-
 export const SYSTEM_CHAPTER_DRAFT = `你是一位专业的小说家。请根据作者提供的台本（剧情梗概），扩写成精彩的小说章节。
 
 写作要求：
@@ -124,9 +111,6 @@ export const USER_WORLD_BUILDING = (seedAndChars: string) =>
 
 export const USER_PLOT_ARCHITECTURE = (fullContext: string) =>
   `以下是已有的所有设定：\n\n${fullContext}\n\n请根据上述设定，构建完整的三幕式情节架构。`
-
-export const USER_CHAPTER_BLUEPRINT = (architecture: string, numChapters: number) =>
-  `以下是小说架构：\n\n${architecture}\n\n请生成 ${numChapters} 章的详细章节蓝图。`
 
 export const USER_CHAPTER_DRAFT = (context: string) =>
   `以下是小说设定和上下文信息：\n\n${context}\n\n请写出本章的正文内容。`
