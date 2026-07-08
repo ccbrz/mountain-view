@@ -20,7 +20,7 @@ function getNovelOrForbid(db: any, id: string, req: AuthRequest) {
   return novel
 }
 
-const TASKS = ['architecture', 'blueprint', 'chapter', 'finalize', 'consistency'] as const
+const TASKS = ['architecture', 'blueprint', 'chapter', 'finalize', 'consistency', 'rerank'] as const
 type TaskType = typeof TASKS[number]
 
 function getLLMConfigForTask(novel: any, req: AuthRequest, task: TaskType): LLMConfig | null {
@@ -350,21 +350,31 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
         ).join('\n\n---\n\n')
         addRAGDebugLog(novel.id, '2-检索结果', searchDetail)
 
-        // 3. 知识过滤：LLM 对检索结果做三级过滤（冲突检测、价值评估、结构重组）
+        // 3. 知识过滤：若有 rerank 模型则用轻量模型重排，否则按相关性阈值过滤
+        const rerankConfig = getLLMConfigForTask(novel, req, 'rerank')
         const rawContext = results.map((r) => r.text).join('\n---\n')
-        try {
-          const filteredContext = await invokeWithRetry(
-            config,
-            P.SYSTEM_KNOWLEDGE_FILTER,
-            P.USER_KNOWLEDGE_FILTER_V2(keywords, rawContext, outline),
-            3,
-            chapterCtx
-          )
-          context += '\n=== 相关上下文（已过滤）===\n' + filteredContext + '\n'
-          addRAGDebugLog(novel.id, '3-过滤后上下文', filteredContext)
-        } catch (filterErr) {
-          context += '\n=== 相关上下文（向量检索）===\n' + rawContext + '\n'
-          addRAGDebugLog(novel.id, '3-过滤失败（使用原始内容）', rawContext)
+        if (rerankConfig) {
+          try {
+            const filteredContext = await invokeWithRetry(
+              rerankConfig,
+              P.SYSTEM_KNOWLEDGE_FILTER,
+              P.USER_KNOWLEDGE_FILTER_V2(keywords, rawContext, outline),
+              3,
+              { novel_id: novel.id, task: `rerank:${chapterNum}` }
+            )
+            context += '\n=== 相关上下文（已过滤）===\n' + filteredContext + '\n'
+            addRAGDebugLog(novel.id, '3-过滤后上下文', filteredContext)
+          } catch {
+            context += '\n=== 相关上下文 ===\n' + rawContext + '\n'
+          }
+        } else {
+          const passThreshold = 0.4
+          const highScoreResults = results.filter(r => r.score >= passThreshold)
+          const filteredText = highScoreResults.length > 0
+            ? highScoreResults.map(r => r.text).join('\n---\n')
+            : rawContext
+          context += '\n=== 相关上下文 ===\n' + filteredText + '\n'
+          addRAGDebugLog(novel.id, '3-分数过滤', `阈值=${passThreshold}, 通过=${highScoreResults.length}/${results.length}`)
         }
       } else {
         addRAGDebugLog(novel.id, '2-检索结果', '未检索到相关内容')

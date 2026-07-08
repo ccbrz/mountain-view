@@ -62,6 +62,7 @@ const TASK_LABELS: Record<string, { label: string; desc: string }> = {
   chapter: { label: '起草模型', desc: '逐章正文生成（调用最频繁）' },
   finalize: { label: '终稿模型', desc: '更新摘要 / 角色状态' },
   consistency: { label: '审校模型', desc: '一致性检查' },
+  rerank: { label: '重排模型', desc: '知识过滤重排（选个小模型省钱）' },
 }
 
 const INTERFACE_FORMATS = ['OpenAI', 'DeepSeek', 'Ollama', 'Gemini', 'Azure OpenAI', 'ML Studio']
