@@ -391,29 +391,25 @@ router.post('/:id/generate/architecture', authenticate, async (req: AuthRequest,
   const config = getLLMConfigForTask(novel, req, 'architecture')
   if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
 
+  let stage = '核心种子生成'
   try {
     const userInput = req.body?.user_input || ''
     const ctx = { novel_id: novel.id, task: 'architecture' }
-    const steps = [
-      { type: 'core_seed', system: P.SYSTEM_CORE_SEED, user: P.USER_CORE_SEED({ topic: novel.title, genre: novel.genre, guidance: novel.guidance, userInput }) },
-    ]
-
-    const results: { type: string; content: string }[] = []
-
-    for (const step of steps) {
-      const content = await invokeWithRetry(config, step.system, step.user, 3, ctx)
-      results.push({ type: step.type, content })
-    }
-
-    const coreSeed = results[0].content
+    // 作者决定是否重试；保留统一的超时、响应解析和调用日志，每步只请求一次。
+    const coreSeed = await invokeWithRetry(config, P.SYSTEM_CORE_SEED,
+      P.USER_CORE_SEED({ topic: novel.title, genre: novel.genre, guidance: novel.guidance, userInput }), 1, ctx)
+    const results = [{ type: 'core_seed', content: coreSeed }]
 
     // 世界观要参考角色，所以角色先生成；角色单独存一份静态档案，不拼进架构
-    const charsContent = await invokeWithRetry(config, P.SYSTEM_CHARACTERS, P.USER_CHARACTERS(coreSeed), 3, ctx)
+    stage = '角色档案生成'
+    const charsContent = await invokeWithRetry(config, P.SYSTEM_CHARACTERS, P.USER_CHARACTERS(coreSeed), 1, ctx)
     results.push({ type: 'characters', content: charsContent })
 
-    const worldContent = await invokeWithRetry(config, P.SYSTEM_WORLD_BUILDING, P.USER_WORLD_BUILDING(`${coreSeed}\n\n${charsContent}`), 3, ctx)
+    stage = '世界观生成'
+    const worldContent = await invokeWithRetry(config, P.SYSTEM_WORLD_BUILDING, P.USER_WORLD_BUILDING(`${coreSeed}\n\n${charsContent}`), 1, ctx)
     results.push({ type: 'worldbuilding', content: worldContent })
 
+    stage = '架构保存'
     db.transaction(() => {
       assertContextRevision(db, novel.id, novel.context_revision)
       saveDoc(db, novel.id, 'architecture', `=== 核心种子 ===\n${coreSeed}\n\n=== 世界观 ===\n${worldContent}`)
@@ -424,7 +420,7 @@ router.post('/:id/generate/architecture', authenticate, async (req: AuthRequest,
 
     res.json({ message: '架构生成完成', results })
   } catch (err: any) {
-    res.status(err.status || 500).json({ message: `架构生成失败: ${err.message}` })
+    res.status(err.status || 500).json({ message: `${stage}失败：${err.message}。本次已停止，未自动重试，原有架构和角色档案未改动。` })
   }
 })
 
