@@ -3,6 +3,7 @@ import { LLMConfig } from './config'
 /** 把 chat.completion.chunk 流还原成非流式响应里 choices[0] 的形状 */
 function parseSSE(text: string) {
   let content = ''
+  let refusal = ''
   let finish_reason: string | undefined
   let chunks = 0
   for (const line of text.split('\n')) {
@@ -12,12 +13,13 @@ function parseSSE(text: string) {
     if (!payload || payload === '[DONE]') continue
     const c = JSON.parse(payload).choices?.[0]
     content += c?.delta?.content || c?.message?.content || ''
+    refusal += c?.delta?.refusal || c?.message?.refusal || ''
     if (c?.finish_reason) finish_reason = c.finish_reason
   }
   if (!chunks) throw new Error('not SSE')
   // 流被中途掐断时没有 finish_reason，内容是半截的，不能当成功（实测出过截在句中的角色档案）
   if (!finish_reason) throw new StreamCutError(content.length)
-  return { message: { content }, finish_reason }
+  return { message: { content, refusal }, finish_reason }
 }
 
 class StreamCutError extends Error {
@@ -46,19 +48,18 @@ function parseResponse(text: string): any {
   }
 }
 
-export async function invokeLLM(
+export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
+
+/** 对话测试和小说生成共用传输层；直接保留结束原因，便于区分过滤和输出截断。 */
+export async function invokeChat(
   config: LLMConfig,
-  systemPrompt: string,
-  userPrompt: string,
-): Promise<string> {
+  messages: ChatMessage[],
+): Promise<{content: string; refusal: string; finish_reason: string}> {
   const url = `${config.base_url.replace(/\/+$/, '')}/chat/completions`
 
   const body = {
     model: config.model_name,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
+    messages,
     temperature: config.temperature,
     max_tokens: config.max_tokens,
   }
@@ -88,13 +89,15 @@ export async function invokeLLM(
 
     const choice = parseResponse(await res.text())
     const content = choice?.message?.content || ''
+    const refusal = choice?.message?.refusal || ''
     // 推理模型的思考过程也占 max_tokens，额度被思考用完时 content 为空，得报出来而不是当成空回复
-    if (!content) {
+    if (!content && !refusal && choice?.finish_reason !== 'content_filter') {
       throw new Error(choice?.finish_reason === 'length'
         ? `模型输出被截断（max_tokens=${config.max_tokens} 已用完，多半耗在思考过程上），请在模型配置里调大 max_tokens`
         : `模型返回了空内容（finish_reason=${choice?.finish_reason ?? '未知'}）`)
     }
-    return content
+    if (typeof content !== 'string' || typeof refusal !== 'string') throw new Error('模型返回的消息不是文本')
+    return {content,refusal,finish_reason:typeof choice?.finish_reason==='string'?choice.finish_reason:'unknown'}
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error(`LLM 请求超时 (${config.timeout || 600}s)`)
@@ -105,6 +108,12 @@ export async function invokeLLM(
   } finally {
     clearTimeout(timer)
   }
+}
+
+export async function invokeLLM(config: LLMConfig, systemPrompt: string, userPrompt: string): Promise<string> {
+  const result = await invokeChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userPrompt}])
+  if (!result.content) throw new Error(`模型未提供正文（finish_reason=${result.finish_reason}）${result.refusal ? `：${result.refusal}` : ''}`)
+  return result.content
 }
 
 export async function invokeLLMWithConfigName(

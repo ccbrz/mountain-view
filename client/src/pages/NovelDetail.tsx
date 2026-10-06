@@ -18,6 +18,7 @@ import { useAuth } from '../context/AuthContext'
 import ReviewPanel from '../components/ReviewPanel'
 import MemoryReview from '../components/MemoryReview'
 import OutlineReview from '../components/OutlineReview'
+import ChatTest from '../components/ChatTest'
 
 const { TextArea } = Input
 
@@ -158,6 +159,7 @@ export default function NovelDetail() {
 
   // LLM log viewer
   const [logDrawerOpen, setLogDrawerOpen] = useState(false)
+  const [debugTab, setDebugTab] = useState('chat')
   const [llmLogs, setLlmLogs] = useState<LLMCallLog[]>([])
   const [logsLoading, setLogsLoading] = useState(false)
   const logPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -273,9 +275,6 @@ export default function NovelDetail() {
 
   const openLogDrawer = () => {
     setLogDrawerOpen(true)
-    fetchLogs()
-    if (logPollRef.current) clearInterval(logPollRef.current)
-    logPollRef.current = setInterval(fetchLogs, 3000)
   }
 
   const closeLogDrawer = () => {
@@ -287,10 +286,14 @@ export default function NovelDetail() {
   }
 
   useEffect(() => {
+    if(logDrawerOpen&&debugTab==='logs'){
+      void fetchLogs()
+      logPollRef.current=setInterval(fetchLogs,3000)
+    }
     return () => {
       if (logPollRef.current) clearInterval(logPollRef.current)
     }
-  }, [])
+  }, [logDrawerOpen,debugTab,id])
 
   const saveSettings = async () => {
     const vals = await settingsForm.validateFields()
@@ -1394,6 +1397,7 @@ export default function NovelDetail() {
         shape="circle"
         size="large"
         icon={<BugOutlined />}
+        aria-label="LLM 调试"
         onClick={openLogDrawer}
         style={{
           position: 'fixed',
@@ -1409,15 +1413,14 @@ export default function NovelDetail() {
         title={
           <Space>
             <BugOutlined />
-            <span>LLM 调用日志</span>
-            <Badge count={llmLogs.length} style={{ backgroundColor: '#1890ff' }} />
+            <span>LLM 调试</span>
           </Space>
         }
         placement="right"
-        width={720}
+        width="min(760px, 100vw)"
         open={logDrawerOpen}
         onClose={closeLogDrawer}
-        extra={
+        extra={debugTab==='logs'&&
           <Space>
             <Button icon={<ReloadOutlined />} onClick={fetchLogs} loading={logsLoading}>刷新</Button>
             <Popconfirm title="确定清空所有日志？" onConfirm={clearLogs}>
@@ -1426,7 +1429,9 @@ export default function NovelDetail() {
           </Space>
         }
       >
-        {logsLoading && llmLogs.length === 0 ? (
+        <Tabs activeKey={debugTab} onChange={setDebugTab} items={[
+          {key:'chat',label:'对话测试',children:<ChatTest key={id} novelId={id!}/>},
+          {key:'logs',label:<Space>调用日志<Badge count={llmLogs.length} style={{backgroundColor:'#1890ff'}}/></Space>,children:logsLoading && llmLogs.length === 0 ? (
           <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
         ) : llmLogs.length === 0 ? (
           <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>暂无日志</div>
@@ -1531,7 +1536,8 @@ export default function NovelDetail() {
               )
             })}
           </Collapse>
-        )}
+        )},
+        ]}/>
       </Drawer>
     </div>
   )

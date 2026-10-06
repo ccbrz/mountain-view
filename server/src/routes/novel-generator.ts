@@ -4,6 +4,7 @@ import { getDB } from '../db'
 import { authenticate, AuthRequest } from '../middleware/auth'
 import { getLLMConfigs, getLLMConfigByName, LLMConfig } from '../llm/config'
 import { invokeWithRetry, extractChapterBody } from '../llm/invoke'
+import { invokeChat, ChatMessage } from '../llm/adapter'
 import * as P from '../llm/prompts'
 import { PersistentVectorStore } from '../llm/vectorstore'
 import { saveProgressSnapshot, progressBeforeChapter, requireProgressBeforeChapter, listProgressSnapshots, getProgressSnapshot, invalidateFromChapter, bumpContextRevision, assertContextRevision, ContextConflict } from '../llm/doc-snapshots'
@@ -37,6 +38,47 @@ function getNovelOrForbid(db: any, id: string, req: AuthRequest) {
 
 const TASKS = ['architecture', 'chapter', 'finalize', 'consistency', 'rerank'] as const
 type TaskType = typeof TASKS[number]
+
+function getChatTestConfigs(novel: any) {
+  let names: string[] = []
+  const configured = novel.llm_config || ''
+  if (configured.startsWith('{')) {
+    try { const map=JSON.parse(configured); names=TASKS.map(t=>map[t]).filter(n=>typeof n==='string') } catch { /* 无有效配置 */ }
+  } else if (configured) names=[configured]
+  return getLLMConfigs().filter(c=>names.includes(c.name))
+}
+
+router.get('/:id/chat-test', authenticate, (req: AuthRequest,res) => {
+  const novel=getNovelOrForbid(getDB(),req.params.id,req)
+  if(!novel)return res.status(404).json({message:'小说不存在或无权限'})
+  res.json({configs:getChatTestConfigs(novel).map(c=>({name:c.name,model_name:c.model_name}))})
+})
+
+router.post('/:id/chat-test', authenticate, async (req: AuthRequest,res) => {
+  const novel=getNovelOrForbid(getDB(),req.params.id,req)
+  if(!novel)return res.status(404).json({message:'小说不存在或无权限'})
+  const config=getChatTestConfigs(novel).find(c=>c.name===req.body?.config_name)
+  if(!config)return res.status(400).json({message:'请选择当前项目已配置的对话模型'})
+  const {messages,system_prompt=''}=req.body || {}
+  if(!Array.isArray(messages)||!messages.length||messages.length>39||messages.length%2!==1 || messages.some((m:any,i:number)=>
+    !m || m.role!==(i%2===0?'user':'assistant') || typeof m.content!=='string' || !m.content.trim() || m.content.length>8000)) {
+    return res.status(400).json({message:'对话需按用户、模型顺序交替并以用户消息结尾；每条最多 8000 字，最多 20 轮'})
+  }
+  if(typeof system_prompt!=='string'||system_prompt.length>2000 || messages.reduce((n:number,m:any)=>n+m.content.length,system_prompt.length)>16000) {
+    return res.status(400).json({message:'系统提示最多 2000 字，对话总计最多 16000 字；请新建对话后继续'})
+  }
+  const started=Date.now()
+  try {
+    // 只发送测试会话，不拼接小说上下文、不写记忆，也不自动重试。
+    const turns:ChatMessage[]=messages.map((m:ChatMessage)=>({role:m.role,content:m.content}))
+    if(system_prompt.trim())turns.unshift({role:'system',content:system_prompt})
+    const result=await invokeChat(config,turns)
+    res.json({...result,model_name:config.model_name,duration_ms:Date.now()-started})
+  }catch(err:any){
+    const detail=String(err.message||'模型调用失败')
+    res.status(502).json({message:config.api_key?detail.split(config.api_key).join('[REDACTED]'):detail})
+  }
+})
 
 function getLLMConfigForTask(novel: any, req: AuthRequest, task: TaskType, fallback = true): LLMConfig | null {
   let configName = ''
