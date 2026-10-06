@@ -18,8 +18,10 @@ const PORT = process.env.PORT || 3001
 
 app.use(helmet())
 
+const allowedOrigins = getAllowedOrigins()
 app.use(cors({
-  origin: getAllowedOrigins().length > 0 ? getAllowedOrigins() : true,
+  // 生产环境未配置 ALLOWED_ORIGINS 时拒绝跨域，而不是放通全部
+  origin: allowedOrigins.length > 0 ? allowedOrigins : !isProduction(),
   credentials: true,
 }))
 

@@ -1,6 +1,11 @@
 import { Router } from 'express'
 import { getDB } from '../db'
 import { authenticate, AuthRequest } from '../middleware/auth'
+import { bumpContextRevision, assertContextRevision } from '../llm/doc-snapshots'
+import { clearVectorStore } from '../llm/vectorstore'
+
+import { getLLMConfigByName } from '../llm/config'
+import { embed, embeddingSpace } from '../llm/embedding'
 
 const router = Router()
 
@@ -40,7 +45,7 @@ router.get('/:id', authenticate, (req: AuthRequest, res) => {
   if (!isAdmin && !isCreator) return res.status(403).json({ message: '无权限' })
 
   // also fetch docs and chapters count
-  const docs = db.prepare('SELECT doc_type, content FROM novel_docs WHERE novel_id = ?').all(req.params.id) as any[]
+  const docs = db.prepare("SELECT doc_type, content FROM novel_docs WHERE novel_id = ? AND doc_type != 'progress'").all(req.params.id) as any[]
   const chapterCount = db.prepare('SELECT COUNT(*) as count FROM novel_chapters WHERE novel_id = ?').get(req.params.id) as { count: number }
 
   const docMap: Record<string, string> = {}
@@ -64,7 +69,7 @@ router.post('/', authenticate, (req: AuthRequest, res) => {
   res.json({ message: 'ok', id: result.lastInsertRowid })
 })
 
-router.put('/:id', authenticate, (req: AuthRequest, res) => {
+router.put('/:id', authenticate, async (req: AuthRequest, res) => {
   const { title, content, genre, num_chapters, word_number, guidance, status, llm_config, embedding_config, style_reference, style_guide } = req.body
   const db = getDB()
   const novel = db.prepare('SELECT * FROM novels WHERE id = ?').get(req.params.id) as any
@@ -75,27 +80,52 @@ router.put('/:id', authenticate, (req: AuthRequest, res) => {
   const isCreator = novel.creator_username === req.user!.username
   if (!isAdmin && !isCreator) return res.status(403).json({ message: '无权限编辑此小说' })
 
-  db.prepare(
-    `UPDATE novels SET
-      title = ?, content = ?, genre = ?, num_chapters = ?, word_number = ?,
-      guidance = ?, status = ?, llm_config = ?, embedding_config = ?, 
-      style_reference = ?, style_guide = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ?`
-  ).run(
-    title ?? novel.title,
-    content ?? novel.content,
-    genre ?? novel.genre,
-    num_chapters ?? novel.num_chapters,
-    word_number ?? novel.word_number,
-    guidance ?? novel.guidance,
-    status ?? novel.status,
-    llm_config ?? novel.llm_config,
-    embedding_config ?? novel.embedding_config,
-    style_reference ?? novel.style_reference,
-    style_guide ?? novel.style_guide,
-    req.params.id,
-  )
-  res.json({ message: 'ok' })
+  try {
+    if (embedding_config && embedding_config !== novel.embedding_config) {
+      const config = getLLMConfigByName(embedding_config)
+      if (!config) return res.status(400).json({ message: 'Embedding 配置不存在' })
+      await embed(config, '向量连接测试')
+      const currentConfig = getLLMConfigByName(embedding_config)
+      if (!currentConfig || embeddingSpace(currentConfig) !== embeddingSpace(config)) throw new Error('测试期间模型配置已变化，请重新选择')
+      assertContextRevision(db, novel.id, novel.context_revision)
+      // 网络等待期间其他表单可能保存了内容；缺省字段使用最新值。
+      Object.assign(novel, db.prepare('SELECT * FROM novels WHERE id = ?').get(novel.id))
+    }
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE novels SET
+          title = ?, content = ?, genre = ?, num_chapters = ?, word_number = ?,
+          guidance = ?, status = ?, llm_config = ?, embedding_config = ?,
+          style_reference = ?, style_guide = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      ).run(
+        title ?? novel.title,
+        content ?? novel.content,
+        genre ?? novel.genre,
+        num_chapters ?? novel.num_chapters,
+        word_number ?? novel.word_number,
+        guidance ?? novel.guidance,
+        status ?? novel.status,
+        llm_config ?? novel.llm_config,
+        embedding_config ?? novel.embedding_config,
+        style_reference ?? novel.style_reference,
+        style_guide ?? novel.style_guide,
+        req.params.id,
+      )
+      const embeddingChanged = embedding_config !== undefined && embedding_config !== novel.embedding_config
+      if (embeddingChanged) {
+        clearVectorStore(novel.id)
+        db.prepare("UPDATE novel_chapters SET index_status = 'pending' WHERE novel_id = ?").run(novel.id)
+      }
+      if (embeddingChanged || (title !== undefined && title !== novel.title) ||
+        (genre !== undefined && genre !== novel.genre) || (guidance !== undefined && guidance !== novel.guidance)) {
+        bumpContextRevision(db, novel.id)
+      }
+    })()
+    res.json({ message: 'ok' })
+  } catch (err: any) {
+    res.status(err.status || 400).json({ message: err.message })
+  }
 })
 
 router.delete('/:id', authenticate, (req: AuthRequest, res) => {
@@ -107,9 +137,13 @@ router.delete('/:id', authenticate, (req: AuthRequest, res) => {
   const isCreator = novel.creator_username === req.user!.username
   if (!isAdmin && !isCreator) return res.status(403).json({ message: '无权限删除此小说' })
 
-  db.prepare('DELETE FROM novel_chapters WHERE novel_id = ?').run(req.params.id)
-  db.prepare('DELETE FROM novel_docs WHERE novel_id = ?').run(req.params.id)
-  db.prepare('DELETE FROM novels WHERE id = ?').run(req.params.id)
+  db.transaction(() => {
+    clearVectorStore(novel.id)
+    db.prepare('DELETE FROM novel_chapters WHERE novel_id = ?').run(req.params.id)
+    db.prepare('DELETE FROM novel_docs WHERE novel_id = ?').run(req.params.id)
+    db.prepare('DELETE FROM novel_doc_snapshots WHERE novel_id = ?').run(req.params.id)
+    db.prepare('DELETE FROM novels WHERE id = ?').run(req.params.id)
+  })()
   res.json({ message: 'ok' })
 })
 

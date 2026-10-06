@@ -53,6 +53,7 @@ export async function invokeWithRetry(
           input_tokens: inputTokens,
           output_tokens: estimateTokens(text),
           status: 'success',
+          error: '',
         })
       }
       return text
@@ -75,10 +76,19 @@ export async function invokeWithRetry(
 }
 
 function cleanLLMOutput(text: string): string {
-  return text
-    .replace(/<think>[\s\S]*?<\/think>/g, '')
-    .replace(/```[\s\S]*?```/g, '')
-    .trim()
+  const stripped = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+  // 只脱掉包裹整段输出的围栏，正文里的代码块要保留（否则整章内容会被清空）
+  const fenced = stripped.match(/^```[a-zA-Z]*\n([\s\S]*)\n```$/)
+  return fenced ? fenced[1].trim() : stripped
+}
+
+/**
+ * 取 <chapter> 标签内的正文（约定见 prompts.CHAPTER_OUTPUT_FORMAT）。
+ * 没闭合标签（输出被截断）时取到末尾；模型没按约定输出标签时原样返回。
+ */
+export function extractChapterBody(text: string): string {
+  const m = text.match(/<chapter>([\s\S]*?)(?:<\/chapter>|$)/)
+  return m ? m[1].trim() : text
 }
 
 export async function invokeWithRetryStr(

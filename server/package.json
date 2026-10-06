@@ -6,7 +6,13 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "seed": "tsx src/seed.ts"
+    "seed": "tsx src/seed.ts",
+    "test:context": "tsx src/quality/context-check.ts",
+    "test:context-scale": "tsx src/quality/context-scale-check.ts",
+    "test:memory-20": "tsx src/quality/memory-20-check.ts",
+    "test:memory-repair": "tsx src/quality/memory-repair-check.ts",
+    "test:human-review": "tsx src/quality/human-review-check.ts",
+    "test:outline-review": "tsx src/quality/outline-review-check.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
