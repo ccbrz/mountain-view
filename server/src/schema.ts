@@ -155,6 +155,25 @@ export function initSchema() {
       db.exec(`ALTER TABLE novel_chapters ADD COLUMN ${name} ${def}`)
     }
   }
+  addChapterCol('author_note', "TEXT NOT NULL DEFAULT ''")
+  addChapterCol('writer_last_context', "TEXT NOT NULL DEFAULT ''")
+  addChapterCol('writer_incomplete', 'INTEGER NOT NULL DEFAULT 0')
+  db.exec(`CREATE TABLE IF NOT EXISTS writer_artifacts (
+    id TEXT PRIMARY KEY, novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    chapter_id INTEGER NOT NULL REFERENCES novel_chapters(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL, created_at TEXT NOT NULL, content TEXT NOT NULL
+  ); CREATE INDEX IF NOT EXISTS idx_writer_artifacts ON writer_artifacts(chapter_id, created_at DESC);`)
+  db.exec(`CREATE TABLE IF NOT EXISTS writer_memory_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    chapter_number INTEGER, title TEXT NOT NULL DEFAULT '', memory TEXT NOT NULL,
+    kind TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  ); CREATE INDEX IF NOT EXISTS idx_writer_memory_history ON writer_memory_history(novel_id, id DESC);`)
+  const memoryCols = db.prepare('PRAGMA table_info(writer_memory_history)').all() as {name: string}[]
+  for (const [name, type] of [['memory_through_chapter', 'INTEGER'], ['source_digest', "TEXT NOT NULL DEFAULT ''"], ['invalidated_at', "TEXT NOT NULL DEFAULT ''"]]) {
+    if (!memoryCols.some(c => c.name === name)) db.exec(`ALTER TABLE writer_memory_history ADD COLUMN ${name} ${type}`)
+  }
+  db.exec("UPDATE writer_memory_history SET memory_through_chapter=chapter_number WHERE kind='finalize' AND memory_through_chapter IS NULL")
   addChapterCol('outline', "TEXT DEFAULT ''")
   addChapterCol('outline_revision', 'INTEGER NOT NULL DEFAULT 0')
   db.transaction(() => {

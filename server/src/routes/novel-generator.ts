@@ -15,6 +15,8 @@ import { reviewChapter } from '../llm/review'
 import { revisePatchwise } from '../llm/revise'
 import { addLLMCallLog, getLogsByNovelId, clearLogsByNovelId } from '../llm/logstore'
 
+import { buildModelWriterContext, requireWriterBudget } from '../llm/writer-context'
+import { unifiedWriterState, writerDoc } from '../llm/writer-state'
 import { chapterEvidence } from '../llm/chapter-evidence'
 import { checkContinuity, ContinuityConflict } from '../llm/continuity'
 
@@ -27,7 +29,7 @@ router.param('num', (_req, res, next, value) => {
 
 // ---------- helpers ----------
 
-function getNovelOrForbid(db: any, id: string, req: AuthRequest) {
+export function getNovelOrForbid(db: any, id: string, req: AuthRequest) {
   const novel = db.prepare('SELECT * FROM novels WHERE id = ?').get(id) as any
   if (!novel) return null
   const isAdmin = req.user?.role === 'admin'
@@ -45,7 +47,8 @@ function getChatTestConfigs(novel: any) {
   if (configured.startsWith('{')) {
     try { const map=JSON.parse(configured); names=TASKS.map(t=>map[t]).filter(n=>typeof n==='string') } catch { /* 无有效配置 */ }
   } else if (configured) names=[configured]
-  return getLLMConfigs().filter(c=>names.includes(c.name))
+  const selected = unifiedWriterState(getDB(), novel.id)?.model_id
+  return getLLMConfigs().filter(c=>names.includes(c.name) || String(c.id) === selected)
 }
 
 router.get('/:id/chat-test', authenticate, (req: AuthRequest,res) => {
@@ -80,7 +83,7 @@ router.post('/:id/chat-test', authenticate, async (req: AuthRequest,res) => {
   }
 })
 
-function getLLMConfigForTask(novel: any, req: AuthRequest, task: TaskType, fallback = true): LLMConfig | null {
+export function getLLMConfigForTask(novel: any, req: AuthRequest, task: TaskType, fallback = true): LLMConfig | null {
   let configName = ''
   if (novel.llm_config) {
     try {
@@ -131,6 +134,8 @@ function saveDoc(db: any, novelId: number, docType: string, content: string) {
 }
 
 function getDoc(db: any, novelId: number, docType: string): string {
+  const unified = writerDoc(db, novelId, docType)
+  if (unified !== undefined) return unified
   const row = db.prepare('SELECT content FROM novel_docs WHERE novel_id = ? AND doc_type = ?').get(novelId, docType) as any
   return row?.content || ''
 }
@@ -140,7 +145,7 @@ function updateNovelStatus(db: any, novelId: number, status: string) {
 }
 
 /** 调用方负责事务和异步结果的版本检查，所有正文写入共用失效逻辑。 */
-function saveChapterContent(db: any, novelId: number, chapter: any, content: string, note = '') {
+export function saveChapterContent(db: any, novelId: number, chapter: any, content: string, note = '') {
   if (content === chapter.content) return
   if (note && chapter.content) {
     db.prepare('INSERT INTO chapter_revisions (chapter_id, content, word_count, note) VALUES (?, ?, ?, ?)')
@@ -429,6 +434,7 @@ router.post('/:id/generate/architecture', authenticate, async (req: AuthRequest,
   const db = getDB()
   const novel = getNovelOrForbid(db, req.params.id, req)
   if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
+  if (unifiedWriterState(db, novel.id)) return res.status(409).json({message: '请在写作台的 Memory 与 Lorebook 中维护当前记忆和设定；定稿进度仅供查看历史。'})
 
   const config = getLLMConfigForTask(novel, req, 'architecture')
   if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
@@ -486,7 +492,8 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
   const outline = chapter.outline || ''
 
   try {
-    const chapterCtx = { novel_id: novel.id, task: `chapter:${chapterNum}` }
+    const writerState = unifiedWriterState(db, novel.id)
+    const chapterCtx = { novel_id: novel.id, task: `chapter:${chapterNum}`, context_tokens: writerState?.context_tokens }
     let context = P.STORY_CONTEXT(
       getDoc(db, novel.id, 'architecture'),
       getDoc(db, novel.id, 'characters'),
@@ -504,17 +511,22 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
     const isFirst = chapterNum === 1
     const targetWords = novel.word_number || 2000
     const styleRef = novel.style_reference || ''
-    const systemPrompt = P.draftSystemPrompt(isFirst, novel.style_guide || '', targetWords)
-    const userPrompt = isFirst
+    const built = writerState ? requireWriterBudget(await buildModelWriterContext(db, novel, {
+      chapter_idx: chapterNum, title: chapter.title, raw_script: outline, content: '', author_note: chapter.author_note || '', instruction: feedback,
+      settings: {...writerState, max_output_tokens: config.max_tokens},
+    }, config, 'write')) : undefined
+    const systemPrompt = built?.system_prompt || P.draftSystemPrompt(isFirst, novel.style_guide || '', targetWords)
+    const userPrompt = built?.user_prompt || (isFirst
       ? P.USER_FIRST_CHAPTER(context, styleRef, feedback)
-      : P.USER_CHAPTER_DRAFT(`当前是第 ${chapterNum} 章：${chapter.title}\n\n${context}`, styleRef, feedback)
+      : P.USER_CHAPTER_DRAFT(`当前是第 ${chapterNum} 章：${chapter.title}\n\n${context}`, styleRef, feedback))
+    if (built) context = built.user_prompt
 
     addRAGDebugLog(novel.id, '4-最终生成上下文', userPrompt)
 
     let finalContent = extractChapterBody(await invokeWithRetry(config, systemPrompt, userPrompt, 3, chapterCtx))
     if (!finalContent.trim()) throw new Error('模型未返回正文，原稿未改动')
     const guardConfig = getLLMConfigForTask(novel, req, 'consistency') || config
-    let issues = await checkContinuity(guardConfig, context, finalContent, { novel_id: novel.id, task: `continuity:draft:${chapterNum}` })
+    let issues = await checkContinuity(guardConfig, context, finalContent, { novel_id: novel.id, task: `continuity:draft:${chapterNum}`, context_tokens: writerState?.context_tokens })
     if (issues.length) {
       finalContent = extractChapterBody(await invokeWithRetry(config, systemPrompt,
         userPrompt + `\n\n上一稿：\n${finalContent}\n\n请修复以下连续性问题后输出完整正文：\n${JSON.stringify(issues)}`, 3, chapterCtx))
@@ -531,6 +543,7 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
       }
       db.prepare('UPDATE novel_chapters SET content_before_draft = ? WHERE id = ?').run(chapter.content, chapter.id)
       saveChapterContent(db, novel.id, chapter, finalContent, feedback ? `按意见重新生成前存档：${feedback.slice(0, 40)}` : '重新生成前存档')
+      db.prepare('UPDATE novel_chapters SET writer_incomplete=0 WHERE id=?').run(chapter.id)
       updateNovelStatus(db, novel.id, 'in_progress')
     })()
 
@@ -548,6 +561,7 @@ router.post('/:id/chapters/:num/memory-review', authenticate, async (req: AuthRe
   const db = getDB()
   const novel = getNovelOrForbid(db, req.params.id, req)
   if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
+  if (unifiedWriterState(db, novel.id)) return res.status(409).json({message: '请在写作台的 Memory 与 Lorebook 中维护当前记忆和设定；定稿进度仅供查看历史。'})
   const num = Number(req.params.num)
   const chapter = db.prepare('SELECT * FROM novel_chapters WHERE novel_id=? AND chapter_number=?').get(novel.id,num) as any
   if (!chapter?.content?.trim()) return res.status(400).json({ message: '请先填写本章正文' })
@@ -600,6 +614,7 @@ router.put('/:id/chapters/:num/memory-review', authenticate, async (req: AuthReq
   const db = getDB()
   const novel = getNovelOrForbid(db,req.params.id,req)
   if (!novel) return res.status(404).json({message:'小说不存在或无权限'})
+  if (unifiedWriterState(db, novel.id)) return res.status(409).json({message: '请在写作台的 Memory 中维护全书当前记忆；旧版逐章差分记忆已停用。'})
   const num = Number(req.params.num)
   const chapter = db.prepare('SELECT * FROM novel_chapters WHERE novel_id=? AND chapter_number=?').get(novel.id,num) as any
   if (!chapter) return res.status(404).json({message:'章节不存在'})
@@ -638,6 +653,7 @@ router.post('/:id/generate/finalize/:num', authenticate, async (req: AuthRequest
   const db = getDB()
   const novel = getNovelOrForbid(db, req.params.id, req)
   if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
+  if (unifiedWriterState(db, novel.id)) return res.status(409).json({message: '请在写作台的 Memory 与 Lorebook 中维护当前记忆和设定；定稿进度仅供查看历史。'})
 
   const config = getLLMConfigForTask(novel, req, 'finalize')
   if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
@@ -691,7 +707,7 @@ router.post('/:id/chapters/:num/reindex', authenticate, async (req: AuthRequest,
   const chapter = db.prepare('SELECT * FROM novel_chapters WHERE novel_id = ? AND chapter_number = ?').get(novel.id, chapterNum) as any
   if (!chapter || chapter.status !== 'finalized') return res.status(409).json({ message: '请先定稿本章，再更新索引' })
   try {
-    requireProgressBeforeChapter(db, novel.id, chapterNum + 1)
+    if (!unifiedWriterState(db, novel.id)) requireProgressBeforeChapter(db, novel.id, chapterNum + 1)
     await indexChapter(db, novel, chapter)
     res.json({ message: '索引更新完成' })
   } catch (err: any) {
@@ -708,6 +724,7 @@ router.get('/:id/docs', authenticate, (req: AuthRequest, res) => {
   const docs = db.prepare("SELECT doc_type, content FROM novel_docs WHERE novel_id = ? AND doc_type != 'progress'").all(novel.id)
   const map: Record<string, string> = {}
   for (const d of docs as any[]) map[d.doc_type] = d.content
+  if (unifiedWriterState(db, novel.id)) { map.architecture = getDoc(db, novel.id, 'architecture'); map.characters = getDoc(db, novel.id, 'characters') }
   res.json(map)
 })
 
@@ -739,6 +756,7 @@ router.put('/:id/docs/:type', authenticate, (req: AuthRequest, res) => {
   const db = getDB()
   const novel = getNovelOrForbid(db, req.params.id, req)
   if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
+  if (['architecture','characters','writing_desk'].includes(req.params.type) && unifiedWriterState(db, novel.id)) return res.status(409).json({message:'世界与人物已统一到 Lorebook，请在写作台保存修改。'})
   if (req.params.type === 'progress') return res.status(400).json({ message: '故事进度由定稿生成，不能直接编辑' })
   const content = req.body.content || ''
   db.transaction(() => {
@@ -852,21 +870,23 @@ router.post('/:id/review/:num', authenticate, async (req: AuthRequest, res) => {
   if (!chapter || !chapter.content.trim()) return res.status(400).json({ message: '章节不存在或内容为空，请先生成' })
 
   try {
-    const { review } = await reviewChapter(
+    const state = unifiedWriterState(db, novel.id)
+    const { review, context } = await reviewChapter(
       config,
       {
+        ...(state ? {writer: {novel, settings:state, title:chapter.title, author_note:chapter.author_note || ''}} : {}),
         chapterNum,
         content: chapter.content,
         outline: chapter.outline || '',
-        worldSetting: getDoc(db, novel.id, 'architecture'),
-        characters: getDoc(db, novel.id, 'characters'),
-        previousSummary: progressBeforeChapter(db, novel.id, chapterNum) + (await chapterEvidence(novel, chapterNum, `${chapter.title} ${chapter.outline}`)).text,
+        worldSetting: state ? '' : getDoc(db, novel.id, 'architecture'),
+        characters: state ? '' : getDoc(db, novel.id, 'characters'),
+        previousSummary: state ? '' : progressBeforeChapter(db, novel.id, chapterNum) + (await chapterEvidence(novel, chapterNum, `${chapter.title} ${chapter.outline}`)).text,
       },
       { novel_id: novel.id, task: `review:${chapterNum}` },
     )
 
     assertContextRevision(db, novel.id, novel.context_revision)
-    res.json({ message: '审稿完成', review })
+    res.json({ message: '审稿完成', review, context })
   } catch (err: any) {
     res.status(err.status || 500).json({ message: `审稿失败: ${err.message}` })
   }
@@ -892,7 +912,8 @@ router.post('/:id/revise/:num', authenticate, async (req: AuthRequest, res) => {
   if (accepted.length === 0) return res.status(400).json({ message: '请至少勾选一条要采纳的意见' })
 
   try {
-    requireProgressBeforeChapter(db, novel.id, chapterNum)
+    const state = unifiedWriterState(db, novel.id)
+    if (!state) requireProgressBeforeChapter(db, novel.id, chapterNum)
     const result = await revisePatchwise(
       config,
       {
@@ -901,6 +922,8 @@ router.post('/:id/revise/:num', authenticate, async (req: AuthRequest, res) => {
         acceptedNotes: accepted,
         rejectedNotes: rejected,
         styleGuide: novel.style_guide || '',
+        writingRequirements: state?.system_prompt,
+        ...(state ? {writer: {novel, settings:state, chapter_idx:chapterNum, title:chapter.title, author_note:chapter.author_note || ''}} : {}),
       },
       { novel_id: novel.id, task: `revise:${chapterNum}` },
     )

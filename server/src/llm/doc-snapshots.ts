@@ -1,3 +1,5 @@
+import { writerDoc } from './writer-state'
+import { invalidateWriterMemory } from './writer-memory'
 import { ProgressState, renderProgress, RECENT_SUMMARIES } from './progress'
 
 /**
@@ -59,6 +61,7 @@ export function requireProgressBeforeChapter(db: any, novelId: number, chapterNu
 
 /** 调用方与正文/设定的写入放在同一个事务里；保留正文，只清除派生数据。 */
 export function invalidateFromChapter(db: any, novelId: number, chapterNum: number, reviewCurrent = false) {
+  invalidateWriterMemory(db, novelId, chapterNum)
   bumpContextRevision(db, novelId)
   db.prepare('DELETE FROM novel_doc_snapshots WHERE novel_id = ? AND chapter_number > ?').run(novelId, chapterNum)
   db.prepare('DELETE FROM novel_chapter_summaries WHERE novel_id = ? AND chapter_number >= ?').run(novelId, chapterNum)
@@ -111,6 +114,8 @@ export function stateBeforeChapter(db: any, novelId: number, chapterNum: number)
 
 /** 进入第 n 章时的进度文本，起草、审稿用（只带最近几章梗概） */
 export function progressBeforeChapter(db: any, novelId: number, chapterNum: number): string {
+  const current = writerDoc(db, novelId, 'progress')
+  if (current !== undefined) return current
   const s = requireProgressBeforeChapter(db, novelId, chapterNum)
   return s ? renderProgress(s, RECENT_SUMMARIES) : ''
 }

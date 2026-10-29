@@ -1,3 +1,4 @@
+import { unifiedWriterState, recentWriterProse } from './writer-state'
 import { getDB } from '../db'
 import { PersistentVectorStore } from './vectorstore'
 
@@ -55,6 +56,8 @@ export function searchChapterText(novelId: number, before: number, query: string
 }
 
 export async function chapterEvidence(novel: any, before: number, query: string): Promise<{ text: string; warning: string }> {
+  const state = unifiedWriterState(getDB(), novel.id)
+  if (state) return { text: recentWriterProse(getDB(), novel.id, before, state.recent_context_chars).map(r => `【近期正文 · 第 ${r.chapter_number} 章】\n${r.content}`).join('\n\n'), warning: '' }
   const evidence = searchChapterText(novel.id, before, query)
   let warning = ''
   if (novel.embedding_config) {

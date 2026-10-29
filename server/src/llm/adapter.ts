@@ -1,5 +1,11 @@
 import { LLMConfig } from './config'
 
+export class OutputTruncatedError extends Error {
+  constructor(public partial = '') {
+    super('模型输出达到单次输出上限，结果未完成。原正文和 Memory 未被覆盖；请调高单次输出上限后重试。')
+  }
+}
+
 /** 把 chat.completion.chunk 流还原成非流式响应里 choices[0] 的形状 */
 function parseSSE(text: string) {
   let content = ''
@@ -50,6 +56,21 @@ function parseResponse(text: string): any {
 
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
+/** Counts prompt text, excluding chat framing (the caller reserves a separate margin). */
+export async function countInputTokens(config: LLMConfig, system: string, user: string): Promise<number | undefined> {
+  if (new URL(config.base_url).hostname !== 'text.novelai.net') return undefined
+  const response = await fetch(`${config.base_url.replace(/\/+$/, '')}/internal/token-count`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', Authorization: `Bearer ${config.api_key}`},
+    body: JSON.stringify({model: config.model_name, prompt: system + '\n\n' + user}),
+    signal: AbortSignal.timeout(15000),
+  })
+  if (!response.ok) throw new Error(`NovelAI token 计数失败（HTTP ${response.status}）`)
+  const data: any = await response.json()
+  if (!Number.isSafeInteger(data.length) || data.length < 0) throw new Error('NovelAI token 计数返回无效')
+  return data.length
+}
+
 /** 对话测试和小说生成共用传输层；直接保留结束原因，便于区分过滤和输出截断。 */
 export async function invokeChat(
   config: LLMConfig,
@@ -62,6 +83,8 @@ export async function invokeChat(
     messages,
     temperature: config.temperature,
     max_tokens: config.max_tokens,
+    // NovelAI 的非流式响应实测只有 token_ids、text 为空；流式才返回 delta.content。
+    ...(new URL(url).hostname === 'text.novelai.net' ? { stream: true } : {}),
   }
 
   const headers: Record<string, string> = {
@@ -92,9 +115,8 @@ export async function invokeChat(
     const refusal = choice?.message?.refusal || ''
     // 推理模型的思考过程也占 max_tokens，额度被思考用完时 content 为空，得报出来而不是当成空回复
     if (!content && !refusal && choice?.finish_reason !== 'content_filter') {
-      throw new Error(choice?.finish_reason === 'length'
-        ? `模型输出被截断（max_tokens=${config.max_tokens} 已用完，多半耗在思考过程上），请在模型配置里调大 max_tokens`
-        : `模型返回了空内容（finish_reason=${choice?.finish_reason ?? '未知'}）`)
+      if (choice?.finish_reason === 'length') throw new OutputTruncatedError()
+      throw new Error(`模型返回了空内容（finish_reason=${choice?.finish_reason ?? '未知'}）`)
     }
     if (typeof content !== 'string' || typeof refusal !== 'string') throw new Error('模型返回的消息不是文本')
     return {content,refusal,finish_reason:typeof choice?.finish_reason==='string'?choice.finish_reason:'unknown'}
@@ -110,9 +132,16 @@ export async function invokeChat(
   }
 }
 
-export async function invokeLLM(config: LLMConfig, systemPrompt: string, userPrompt: string): Promise<string> {
+export async function invokeLLMResult(config: LLMConfig, systemPrompt: string, userPrompt: string) {
   const result = await invokeChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userPrompt}])
+  if (!result.content && result.finish_reason === 'length') throw new OutputTruncatedError()
   if (!result.content) throw new Error(`模型未提供正文（finish_reason=${result.finish_reason}）${result.refusal ? `：${result.refusal}` : ''}`)
+  return result
+}
+
+export async function invokeLLM(config: LLMConfig, systemPrompt: string, userPrompt: string): Promise<string> {
+  const result = await invokeLLMResult(config, systemPrompt, userPrompt)
+  if (result.finish_reason === 'length') throw new OutputTruncatedError(result.content)
   return result.content
 }
 

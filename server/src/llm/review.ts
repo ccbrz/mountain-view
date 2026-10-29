@@ -1,15 +1,14 @@
-/**
- * 审稿员 Agent。分工：
- * - AI 味（文笔分）交给 oh-story 的检测脚本，确定性，程序算分；
- * - 模型只判台本覆盖、凭空加戏、设定一致性、网文指标。
- * 总分和定稿结论由程序计算。
- */
+/** Legacy review retains scanner scoring; the writing desk uses style-aware, evidence-backed diagnosis. */
 
+import { getDB } from '../db'
+import { WriterSettings } from './writer-state'
+import { buildWriterContext, buildModelWriterContext, requireWriterBudget } from './writer-context'
 import { LLMConfig } from './config'
 import { invokeWithRetry, InvokeContext } from './invoke'
 import * as P from './prompts'
 import { parseLooseJSON } from './json-repair'
 import { scanAiPatterns, groupAiFindings, AiCheck } from '../quality/ai-patterns'
+import { outlineBeats } from './writer-preparation'
 
 export interface ReviewIssue {
   /** 台本漏写 / 凭空加戏 / 设定一致性 / 网文指标；AI味 由检测脚本结果合成 */
@@ -18,6 +17,9 @@ export interface ReviewIssue {
   problem: string
   quote: string
   suggestion: string
+  layer?: '故事' | '用笔' | '表达'
+  resolution?: 'local' | 'author_decision'
+  evidence?: {source: string; quote: string}[]
 }
 
 /** 各维度得分，满分见 SCORE_MAX，与 SYSTEM_REVIEW 里的评分规则一致 */
@@ -72,6 +74,7 @@ export interface ReviewInput {
   worldSetting: string
   characters: string
   previousSummary: string
+  writer?: {novel: any; settings: WriterSettings; title: string; author_note: string}
 }
 
 /** 审稿要的是稳定的判断，同一章重审分数不该大幅跳动 */
@@ -83,10 +86,7 @@ const HOLD_BACK = /^\s*不揭示[:：]/
 
 /** 台本按行拆成情节点；只有一行时按句拆。去掉作者自己写的序号 */
 export function splitOutlineBeats(outline: string): string[] {
-  const clean = (s: string) => s.replace(/^\s*(?:\d+[.、)）]|[-*•])\s*/, '').trim()
-  let beats = outline.split('\n').filter((l) => !SCENE_HEAD.test(l) && !HOLD_BACK.test(l)).map(clean).filter(Boolean)
-  if (beats.length === 1) beats = beats[0].split(/(?<=[。！？!?])/).map(clean).filter(Boolean)
-  return beats
+  return outlineBeats(outline)
 }
 
 /**
@@ -106,10 +106,10 @@ function aiChecksToIssue(checks: AiCheck[]): ReviewIssue {
   }
 }
 
-export function parseReviewJSON(text: string, outlineBeats: string[] = [], aiChecks: AiCheck[] = []): ReviewResult {
+export function parseReviewJSON(text: string, outlineBeats: string[] = [], aiChecks: AiCheck[] = [], styleAware = false): ReviewResult {
   const obj: any = parseLooseJSON(text, '{')
 
-  if (obj && typeof obj === 'object') {
+  if (obj && typeof obj === 'object' && (!styleAware || Array.isArray(obj.beats) && Array.isArray(obj.issues) && obj.scores && ['prose', 'consistency', 'webnovel'].every(k => Number.isFinite(obj.scores[k])))) {
     const issues: ReviewIssue[] = Array.isArray(obj.issues)
       ? obj.issues.map((i: any) => ({
           dimension: String(i?.dimension || '其他'),
@@ -117,9 +117,14 @@ export function parseReviewJSON(text: string, outlineBeats: string[] = [], aiChe
           problem: String(i?.problem || ''),
           quote: String(i?.quote || ''),
           suggestion: String(i?.suggestion || ''),
+          ...(styleAware ? {
+            layer: i?.layer === '用笔' || i?.layer === '表达' ? i.layer : '故事',
+            resolution: i?.resolution === 'local' ? 'local' : 'author_decision',
+            evidence: Array.isArray(i?.evidence) ? i.evidence.filter((e: any) => typeof e?.source === 'string' && typeof e?.quote === 'string').map((e: any) => ({source: e.source, quote: e.quote})) : [],
+          } : {}),
         }))
       : []
-    if (aiChecks.length) issues.push(aiChecksToIssue(aiChecks))
+    if (aiChecks.length && !styleAware) issues.push(aiChecksToIssue(aiChecks))
     // 按程序拆出的情节点对齐；模型漏报的条目按漏写算，免得少报反而得高分
     const reported = new Map<number, any>()
     for (const b of Array.isArray(obj.beats) ? obj.beats : []) reported.set(Number(b?.point), b)
@@ -135,10 +140,8 @@ export function parseReviewJSON(text: string, outlineBeats: string[] = [], aiChe
     const clamp = (v: unknown, max: number) => Math.min(max, Math.max(0, Math.round(Number(v) || 0)))
     const scores: ReviewScores = {
       coverage: Math.max(0, Math.round(SCORE_MAX.coverage * beatScore) - ADDED_PLOT_PENALTY * addedPlot),
-      prose: Math.max(
-        0,
-        SCORE_MAX.prose -
-          aiChecks.reduce((s, c) => s + (c.severity === 'blocking' ? BLOCKING_TYPE_PENALTY : ADVISORY_TYPE_PENALTY), 0),
+      prose: styleAware ? clamp(obj.scores?.prose, SCORE_MAX.prose) : Math.max(
+        0, SCORE_MAX.prose - aiChecks.reduce((s, c) => s + (c.severity === 'blocking' ? BLOCKING_TYPE_PENALTY : ADVISORY_TYPE_PENALTY), 0),
       ),
       consistency: clamp(obj.scores?.consistency, SCORE_MAX.consistency),
       webnovel: clamp(obj.scores?.webnovel, SCORE_MAX.webnovel),
@@ -172,25 +175,44 @@ export async function reviewChapter(
   config: LLMConfig,
   input: ReviewInput,
   ctx: InvokeContext,
-): Promise<{ review: ReviewResult }> {
-  const aiChecks = groupAiFindings(scanAiPatterns(input.content))
+  retries = 3,
+): Promise<{ review: ReviewResult; context?: ReturnType<typeof buildWriterContext> }> {
+  let scanned: AiCheck[] = [], scanWarning = ''
+  try { scanned = groupAiFindings(scanAiPatterns(input.content)) } catch (e) {
+    if (!input.writer) throw e
+    scanWarning = '表达扫描暂不可用，本次由模型按作者文风诊断，不影响原稿。'
+  }
+  const aiChecks = input.writer ? scanned.map(c => ({...c, severity: 'advisory' as const})) : scanned
   const outlineBeats = splitOutlineBeats(input.outline)
   const holdBack = input.outline.split('\n').filter((l) => HOLD_BACK.test(l)).map((l) => l.trim())
 
+  const numbered = outlineBeats.map((b, i) => `${i + 1}. ${b}`).join('\n') + (holdBack.length ? `\n\n以下不是情节点，是本章不能写出的内容：\n${holdBack.join('\n')}` : '')
+  const context = input.writer ? requireWriterBudget(await buildModelWriterContext(getDB(), input.writer.novel, {
+    chapter_idx: input.chapterNum, title: input.writer.title, raw_script: numbered, content: input.content, author_note: input.writer.author_note,
+    scan_hints: JSON.stringify(aiChecks.slice(0, 8).map(c => ({label: c.label, excerpts: c.excerpts.slice(0, 2)}))),
+    settings: {...input.writer.settings, max_output_tokens: config.max_tokens},
+  }, config, 'review')) : undefined
   const text = await invokeWithRetry(
     { ...config, temperature: REVIEW_TEMPERATURE },
-    P.SYSTEM_REVIEW,
-    P.USER_REVIEW({
-      outline: outlineBeats.map((b, i) => `${i + 1}. ${b}`).join('\n') + (holdBack.length ? `\n\n以下不是情节点，是本章不能写出的内容：\n${holdBack.join('\n')}` : ''),
-      content: input.content,
-      worldSetting: input.worldSetting,
-      characters: input.characters,
-      previousSummary: input.previousSummary,
-      chapterNum: input.chapterNum,
-    }),
-    3,
-    ctx,
+    context?.system_prompt || P.SYSTEM_REVIEW,
+    context?.user_prompt || P.USER_REVIEW({...input, outline: numbered}),
+    retries, ctx,
   )
+  const review = parseReviewJSON(text, outlineBeats, aiChecks, !!input.writer)
+  if (scanWarning) review.summary += '\n' + scanWarning
+  if (input.writer && context && !review.raw) {
+    for (const issue of review.issues) {
+      issue.evidence = issue.evidence?.filter(e => e.quote.trim() && context.blocks.some(b => !/范文|扫描|审稿依据|修改要求/.test(b.label) && (b.label === e.source || b.label.replace(/^Lorebook · /, '设定 · ') === e.source) && b.text.includes(e.quote)))
+      if (!issue.quote.trim() || !input.content.includes(issue.quote) || !issue.evidence?.length) issue.resolution = 'author_decision'
+    }
+    review.issues.sort((a, b) => ['故事', '用笔', '表达'].indexOf(a.layer!) - ['故事', '用笔', '表达'].indexOf(b.layer!))
+    // A claimed covered beat without an actual prose quote is unverified, even with a high score.
+    for (const beat of review.beats) if (beat.status === '已写' && (!beat.quote.trim() || !input.content.includes(beat.quote))) beat.status = '弱化'
+    if (review.beats.length) review.scores.coverage = Math.max(0, Math.round(SCORE_MAX.coverage * review.beats.reduce((s, b) => s + (b.status === '已写' ? 1 : b.status === '弱化' ? .5 : 0), 0) / review.beats.length) - ADDED_PLOT_PENALTY * review.issues.filter(i => i.dimension === '凭空加戏').length)
+    review.total = Object.values(review.scores).reduce((sum, score) => sum + score, 0)
+    if (review.beats.some(b => b.status !== '已写')) review.verdict = 'revise'
+  }
+  if (context?.warnings.length) review.summary += '\n上下文提示：' + context.warnings.join('；')
+  return { review, context }
 
-  return { review: parseReviewJSON(text, outlineBeats, aiChecks) }
 }

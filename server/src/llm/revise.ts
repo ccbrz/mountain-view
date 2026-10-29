@@ -10,6 +10,9 @@
  * 对不上就跳过并如实报告，绝不模糊匹配——改不动好过改错。
  */
 
+import { WriterSettings } from './writer-state'
+import { getDB } from '../db'
+import { buildModelWriterContext, requireWriterBudget } from './writer-context'
 import { LLMConfig } from './config'
 import { invokeWithRetry, InvokeContext } from './invoke'
 import * as P from './prompts'
@@ -35,6 +38,7 @@ export interface ReviseResult {
   /** 净增减字数，负数代表压缩 */
   wordDelta: number
   raw?: string
+  context?: Awaited<ReturnType<typeof buildModelWriterContext>>
 }
 
 /** 修订不需要创造力，降温执行。起草那档温度会让它自由发挥。 */
@@ -111,20 +115,28 @@ export async function revisePatchwise(
     acceptedNotes: string[]
     rejectedNotes: string[]
     styleGuide?: string
+    writingRequirements?: string
+    writer?: {novel: any; settings: WriterSettings; chapter_idx: number; title: string; author_note: string}
   },
   ctx: InvokeContext,
+  retries = 3,
 ): Promise<ReviseResult> {
+  const context = params.writer ? requireWriterBudget(await buildModelWriterContext(getDB(), params.writer.novel, {
+    chapter_idx: params.writer.chapter_idx, title: params.writer.title, author_note: params.writer.author_note,
+    raw_script: params.outline, content: params.content, instruction: params.acceptedNotes.join('\n'), rejected_notes: params.rejectedNotes,
+    settings: {...params.writer.settings, max_output_tokens: config.max_tokens},
+  }, config, 'patch')) : undefined
   const text = await invokeWithRetry(
     { ...config, temperature: REVISE_TEMPERATURE },
-    P.patchReviseSystemPrompt(params.styleGuide || ''),
-    P.USER_PATCH_REVISE(params),
-    3,
+    context?.system_prompt || P.patchReviseSystemPrompt(params.styleGuide || '', params.writingRequirements),
+    context?.user_prompt || P.USER_PATCH_REVISE(params),
+    retries,
     ctx,
   )
 
   const { patches, raw } = parsePatches(text)
   if (raw) {
-    return { content: params.content, applied: [], failed: [], wordDelta: 0, raw }
+    return { content: params.content, applied: [], failed: [], wordDelta: 0, raw, context }
   }
-  return applyPatches(params.content, patches)
+  return {...applyPatches(params.content, patches), context}
 }

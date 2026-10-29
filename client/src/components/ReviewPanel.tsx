@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, Checkbox, Space, Tag, Alert, Empty, message, Divider, Collapse, Progress, Input, Popconfirm } from 'antd'
+import { Button, Checkbox, Space, Tag, Alert, Empty, message, Divider, Collapse, Progress, Input, Popconfirm, theme } from 'antd'
 import { AuditOutlined, EditOutlined, HistoryOutlined } from '@ant-design/icons'
 import api from '../api'
 
@@ -9,6 +9,9 @@ export interface ReviewIssue {
   problem: string
   quote: string
   suggestion: string
+  layer?: '故事' | '用笔' | '表达'
+  resolution?: 'local' | 'author_decision'
+  evidence?: {source: string; quote: string}[]
 }
 
 interface ReviewScores {
@@ -85,13 +88,6 @@ function buildItems(review: ReviewResult): Item[] {
   }))
 }
 
-/** 台本类问题用醒目底色，其余统一浅灰 */
-const DIMENSION_STYLE: Record<string, { color: string; bg: string; border: string }> = {
-  台本漏写: { color: 'red', bg: '#fff2f0', border: '#ffccc7' },
-  凭空加戏: { color: 'orange', bg: '#fff7e6', border: '#ffd591' },
-}
-const DEFAULT_STYLE = { color: 'blue', bg: '#fafafa', border: '#f0f0f0' }
-
 export default function ReviewPanel({
   novelId,
   chapterNum,
@@ -105,6 +101,12 @@ export default function ReviewPanel({
   onRevised: () => void
   beforeAction: () => Promise<void>
 }) {
+  const { token } = theme.useToken()
+  const DIMENSION_STYLE: Record<string, { color: string; bg: string; border: string }> = {
+    台本漏写: { color: 'red', bg: token.colorErrorBg, border: token.colorErrorBorder },
+    凭空加戏: { color: 'orange', bg: token.colorWarningBg, border: token.colorWarningBorder },
+  }
+  const DEFAULT_STYLE = { color: 'blue', bg: token.colorFillQuaternary, border: token.colorBorderSecondary }
   const [review, setReview] = useState<ReviewResult | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [checked, setChecked] = useState<string[]>([])
@@ -175,7 +177,7 @@ export default function ReviewPanel({
 
   const feedbackBox = (
     <div style={{ marginTop: 16 }}>
-      <div style={{ fontSize: 13, color: '#666', marginBottom: 6 }}>
+      <div style={{ fontSize: 13, color: token.colorTextSecondary, marginBottom: 6 }}>
         有明显不妥、需要推倒重写的地方？写下你的意见，整章按意见重新生成（当前稿会存进修订记录，可回退）。
       </div>
       <Input.TextArea
@@ -218,7 +220,7 @@ export default function ReviewPanel({
           {reviewing ? '审稿中，约需 30–60 秒…' : '送审'}
         </Button>
         {!canReview && (
-          <div style={{ fontSize: 12, color: '#999', marginTop: 6, textAlign: 'center' }}>
+          <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 6, textAlign: 'center' }}>
             请先在设置中选择审校模型
           </div>
         )}
@@ -258,7 +260,7 @@ export default function ReviewPanel({
           <div style={{ flex: 1 }}>
             {SCORE_ROWS.map((r) => (
               <div key={r.key} style={{ display: 'flex', alignItems: 'center', fontSize: 12 }}>
-                <span style={{ width: 56, color: '#666' }}>{r.label}</span>
+                <span style={{ width: 56, color: token.colorTextSecondary }}>{r.label}</span>
                 <Progress
                   percent={(review.scores[r.key] / r.max) * 100}
                   strokeColor={scoreColor(review.scores[r.key] / r.max)}
@@ -266,7 +268,7 @@ export default function ReviewPanel({
                   size="small"
                   style={{ flex: 1, margin: 0 }}
                 />
-                <span style={{ width: 44, textAlign: 'right', color: '#666' }}>
+                <span style={{ width: 44, textAlign: 'right', color: token.colorTextSecondary }}>
                   {review.scores[r.key]}/{r.max}
                 </span>
               </div>
@@ -280,9 +282,9 @@ export default function ReviewPanel({
           {review.beats.map((b) => (
             <div key={b.point} style={{ display: 'flex', gap: 6 }}>
               <Tag color={BEAT_COLOR[b.status]} style={{ margin: 0, flexShrink: 0 }}>{b.status}</Tag>
-              <span style={{ color: '#333' }}>
+              <span style={{ color: token.colorText }}>
                 {b.point}. {b.text}
-                {b.quote && <span style={{ color: '#999' }}>　「{b.quote}」</span>}
+                {b.quote && <span style={{ color: token.colorTextSecondary }}>　「{b.quote}」</span>}
               </span>
             </div>
           ))}
@@ -291,7 +293,7 @@ export default function ReviewPanel({
 
       {!review.raw && review.aiChecks && review.aiChecks.length > 0 && (
         <div style={{ marginBottom: 12, fontSize: 12 }}>
-          <span style={{ color: '#666', marginRight: 6 }}>AI 味检测</span>
+          <span style={{ color: token.colorTextSecondary, marginRight: 6 }}>AI 味检测</span>
           {review.aiChecks.map((c) => (
             <Tag key={c.type} color={c.severity === 'blocking' ? 'red' : 'gold'} style={{ marginBottom: 4 }}>
               {c.label}×{c.count}
@@ -321,7 +323,7 @@ export default function ReviewPanel({
       {items.length > 0 && (
         <>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <span style={{ fontSize: 13, color: '#666' }}>
+            <span style={{ fontSize: 13, color: token.colorTextSecondary }}>
               共 {items.length} 条，已选 {checkedCount} 条（默认勾选必改）。未勾选的会明确告知模型不要改动。
             </span>
             <Space size={4}>
@@ -357,12 +359,12 @@ export default function ReviewPanel({
                       </div>
                       <div style={{ fontSize: 13, lineHeight: 1.6 }}>{it.problem}</div>
                       {it.quote && (
-                        <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+                        <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4 }}>
                           原文：{it.quote}
                         </div>
                       )}
                       {it.suggestion && (
-                        <div style={{ fontSize: 12, color: '#555', marginTop: 4, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                        <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
                           改法：{it.suggestion}
                         </div>
                       )}
@@ -413,11 +415,11 @@ export default function ReviewPanel({
                   <div style={{ fontSize: 12 }}>
                     {revised.applied.map((p, i) => (
                       <div key={i} style={{ marginBottom: 10 }}>
-                        <div style={{ color: '#666', marginBottom: 2 }}>{i + 1}. {p.note}</div>
-                        <div style={{ background: '#fff1f0', padding: '2px 6px', borderRadius: 2, marginBottom: 2 }}>
+                        <div style={{ color: token.colorTextSecondary, marginBottom: 2 }}>{i + 1}. {p.note}</div>
+                        <div style={{ background: token.colorErrorBg, padding: '2px 6px', borderRadius: 2, marginBottom: 2 }}>
                           − {p.find.slice(0, 120)}{p.find.length > 120 ? `…（${p.find.length} 字）` : ''}
                         </div>
-                        <div style={{ background: '#f6ffed', padding: '2px 6px', borderRadius: 2 }}>
+                        <div style={{ background: token.colorSuccessBg, padding: '2px 6px', borderRadius: 2 }}>
                           + {p.replace ? p.replace.slice(0, 120) + (p.replace.length > 120 ? `…（${p.replace.length} 字）` : '') : '（整段删除）'}
                         </div>
                       </div>

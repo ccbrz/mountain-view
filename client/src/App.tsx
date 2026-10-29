@@ -27,8 +27,8 @@ export default function App() {
           <Route index element={<DefaultRedirect />} />
           <Route path="permissions" element={<AdminGuard><PermissionManagement /></AdminGuard>} />
           <Route path="fantasy" element={<FantasyWriter />} />
-          <Route path="novels/:id" element={<NovelDetail />} />
         </Route>
+        <Route path="/novels/:id" element={<ProtectedRoute><NovelDetail /></ProtectedRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AuthProvider>

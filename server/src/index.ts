@@ -7,6 +7,7 @@ import authRoutes from './routes/auth'
 import roleRoutes from './routes/roles'
 import novelRoutes from './routes/novels'
 import novelGeneratorRoutes from './routes/novel-generator'
+import writerRoutes from './routes/writer'
 import llmConfigRoutes from './routes/llm-configs'
 import { initSchema } from './schema'
 import { initLogStore } from './llm/logstore'
@@ -25,7 +26,7 @@ app.use(cors({
   credentials: true,
 }))
 
-app.use(express.json())
+app.use(express.json({ limit: '4mb' }))
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -44,6 +45,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/roles', roleRoutes)
 app.use('/api/novels', novelRoutes)
 app.use('/api/novels', novelGeneratorRoutes)
+app.use('/api/novels', writerRoutes)
 app.use('/api/llm-configs', llmConfigRoutes)
 
 if (isProduction()) {
@@ -57,6 +59,6 @@ initSchema()
 initLogStore()
 initVectorStore()
 
-app.listen(PORT, () => {
+app.listen(Number(PORT), process.env.HOST || '0.0.0.0', () => {
   console.log(`Server running on http://localhost:${PORT}`)
 })

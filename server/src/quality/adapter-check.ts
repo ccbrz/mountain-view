@@ -1,5 +1,6 @@
 import http from 'http'
-import { invokeLLM } from '../llm/adapter'
+import assert from 'node:assert/strict'
+import { invokeLLM, OutputTruncatedError } from '../llm/adapter'
 
 // 本地假网关：按路径返回不同格式，content-type 故意给错，验证 adapter 按内容识别
 const sse = [
@@ -24,14 +25,37 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': type }).end(body)
 })
 server.listen(0, async () => {
-  const port = (server.address() as any).port
-  for (const path of Object.keys(cases)) {
-    const cfg: any = { base_url: `http://127.0.0.1:${port}${path}`, model_name: 'x', temperature: 0, max_tokens: 10, timeout: 5 }
-    try {
-      console.log(path, '→', await invokeLLM(cfg, 's', 'u'))
-    } catch (e: any) {
-      console.log(path, '→ 报错:', e.message)
+  const realFetch = globalThis.fetch
+  try {
+    const port = (server.address() as any).port
+    for (const path of Object.keys(cases)) {
+      const cfg: any = { base_url: `http://127.0.0.1:${port}${path}`, model_name: 'x', temperature: 0, max_tokens: 10, timeout: 5 }
+      if (path === '/garbage') await assert.rejects(invokeLLM(cfg, 's', 'u'), /无法解析模型响应/)
+      else assert.equal(await invokeLLM(cfg, 's', 'u'), '你好')
     }
+    const cfg: any = { base_url: 'https://text.novelai.net/oa/v1', model_name: 'xialong-v1', api_key: 'test-only', temperature: 0.7, max_tokens: 8192, timeout: 5 }
+    let mode = 'stop'
+    globalThis.fetch = (async (url: any, options: any) => {
+      const body = JSON.parse(options.body)
+      assert.equal(body.stream, String(url).startsWith('https://text.novelai.net/') ? true : undefined)
+      assert.equal(body.max_tokens, 8192)
+      assert.equal(options.headers.Authorization, 'Bearer test-only')
+      if (!body.stream) return Response.json({ choices: [{ message: { content: '你好' }, finish_reason: 'stop' }] })
+      if (mode === 'cut') return new Response('data: {"choices":[{"delta":{"content":"半句"}}]}\n\n')
+      return new Response(sse.replace('"stop"', JSON.stringify(mode)))
+    }) as typeof fetch
+    assert.equal(await invokeLLM(cfg, '', '请仅回复 OK。'), '你好')
+    mode = 'length'
+    await assert.rejects(invokeLLM(cfg, '', '任务'), (err: any) => err instanceof OutputTruncatedError && err.partial === '你好')
+    mode = 'cut'
+    await assert.rejects(invokeLLM(cfg, '', '任务'), /中途断开/)
+    assert.equal(await invokeLLM({ ...cfg, base_url: 'https://other.invalid/v1' }, '', '任务'), '你好')
+    console.log('✓ JSON/SSE 解析、NovelAI 流式请求、截断保护及其他服务兼容性通过')
+  } catch (err) {
+    console.error(err)
+    process.exitCode = 1
+  } finally {
+    globalThis.fetch = realFetch
+    server.close()
   }
-  server.close()
 })
