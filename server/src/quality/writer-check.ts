@@ -429,15 +429,16 @@ async function main() {
     console.log('✓ 截断 Memory/选段/原生重写被拒绝，原记忆与正文保留；共享调用不自动重复长度失败，日志留存截断证据')
 
 
-    const polishModel = Number(db.prepare("INSERT INTO llm_configs(name,base_url,model_name,api_key) VALUES ('polish-selected','https://writer-test.invalid/v1','polish-model','polish-only-secret')").run().lastInsertRowid)
+    const polishModel = Number(db.prepare("INSERT INTO llm_configs(name,base_url,model_name,api_key,temperature,max_tokens) VALUES ('polish-selected','https://writer-test.invalid/v1','polish-model','polish-only-secret',0.23,768)").run().lastInsertRowid)
     const savedProject = await req('/writer/project')
     const originalSettings = JSON.stringify(savedProject.settings), originalChapter = JSON.stringify(row())
     const originalArtifacts = (await req('/writer/chapter/3/history')).items.length
     const entry = {id:'new-unsaved-lore',title:'林舟',category:'人物',keys:['林舟'],enabled:true,always_on:false,text:'林舟是工程师。作者知道父亲仍活着，林舟只认为父亲失踪。计划：下一章发现坐标。原稿另一处称父亲已死亡，尚待核对。'}
-    const polishInput = {...input,settings:{...savedProject.settings,model_id:String(polishModel)},lore_entry:entry}
+    const polishInput = {...input,settings:{...savedProject.settings,model_id:String(polishModel),temperature:0.9},lore_entry:entry}
     expectedModel = 'polish-model'; output = '## 林舟\n### 身份\n- 工程师。\n### 知情范围与秘密\n- 作者知道父亲仍活着；林舟只认为父亲失踪。\n### 剧情计划\n- 下一章发现坐标。\n### 待核对\n- 原稿另一处称父亲已死亡。'
     const polished = await req('/writer/lore/polish','POST',polishInput)
     assert.equal(polished.text,output); assert.equal(polished.context.model.id,String(polishModel))
+    assert.equal(sent.temperature,0.4) // Conservative editing does not change the saved creative temperature.
     assert.deepEqual(polished.context.blocks.map((b:any)=>b.label),['条目名称','条目分类','待整理设定原文','本次任务'])
     assert(polished.context.user_prompt.includes(entry.text)); assert(!polished.context.user_prompt.includes(input.raw_script)); assert(!polished.context.user_prompt.includes(input.content))
     assert(polished.context.system_prompt.includes('不能把计划写成事实')); assert(polished.context.system_prompt.includes('世界观')); assert(polished.context.system_prompt.includes('人物条目'))
@@ -459,6 +460,27 @@ async function main() {
     assert.equal(JSON.stringify((await req('/writer/project')).settings),originalSettings); assert.equal(JSON.stringify(row()),originalChapter)
     expectedModel = 'existing-model'
     console.log('✓ 人物/世界设定整理使用当前所选模型，只发送目标条目；候选不覆盖设定与正文，权限、输入、预算和截断保护生效')
+
+    const independent = {...savedProject.settings, lore_model_id: String(polishModel)}
+    const persisted = await req('/writer/settings','POST',{settings:independent,base_settings:savedProject.settings})
+    assert.equal(persisted.settings.lore_model_id,String(polishModel))
+    assert.equal(persisted.settings.model_id,String(model))
+    assert.equal((await req('/writer/project')).settings.lore_model_id,String(polishModel))
+    expectedModel = 'polish-model'; output = '身份：工程师。'
+    const separate = await req('/writer/lore/polish','POST',{...polishInput,settings:independent})
+    assert.equal(separate.context.model.id,String(polishModel))
+    assert.equal(separate.text,output)
+    assert.equal(sent.temperature,0.23); assert.equal(sent.max_tokens,768)
+    assert.equal(separate.context.budget.output_tokens,768)
+    expectedModel = 'existing-model'
+    const prosePreview = await req('/writer/context','POST',{...input,settings:independent})
+    assert.equal(prosePreview.model.id,String(model))
+    const fallback = {...persisted.settings,lore_model_id:''}
+    const cleared = await req('/writer/settings','POST',{settings:fallback,base_settings:persisted.settings})
+    const followed = await req('/writer/lore/polish','POST',{...polishInput,settings:cleared.settings})
+    assert.equal(followed.context.model.id,String(model))
+    await req('/writer/lore/polish','POST',{...polishInput,settings:{...cleared.settings,lore_model_id:'999999'}},400)
+    console.log('✓ 设定模型独立保存并用于实际调用；正文仍用创作模型，清空后跟随，拒绝失效配置')
 
   } finally { globalThis.fetch = realFetch; server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); db.close() }
 }

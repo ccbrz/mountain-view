@@ -4,7 +4,7 @@ import {
   Tabs, Card, Form, Input, InputNumber, Select, Button,
   Modal, message, Spin, Space, Typography, Tag,
   Table, Popconfirm, Divider, Badge, Slider, Drawer, Collapse,
-  Upload, ConfigProvider, theme,
+  Upload, ConfigProvider, theme, Checkbox,
 } from 'antd'
 import {
   SettingOutlined,
@@ -21,6 +21,42 @@ import WritingDesk from '../components/WritingDesk'
 const { TextArea } = Input
 
 const { Text } = Typography
+
+interface StyleProfile {
+  version: 1
+  samples: {id: string; source: number; start: number; text: string; enabled: boolean; manual?: boolean; preferred?: boolean}[]
+  observations: {advice: string; sample_id: string; quote: string; kind: string; dimension?: string; evidence?: {sample_id: string; quote: string}[]}[]
+}
+interface StyleCandidate {style_guide: string; profile: StyleProfile; base_revision: string; skipped_count?: number; missing_dimensions?: string[]}
+
+function StyleReferenceBank({profile, onChange, disabled}: {profile: StyleProfile | null; onChange: (next: StyleProfile) => void; disabled: boolean}) {
+  const bank: StyleProfile = profile || {version: 1, samples: [], observations: []}
+  const update = (id: string, patch: Partial<StyleProfile['samples'][number]>) => onChange({...bank, samples: bank.samples.map(sample => sample.id === id ? {...sample, ...patch} : sample)})
+  const remove = (id: string) => onChange({...bank, samples: bank.samples.filter(sample => sample.id !== id), observations: bank.observations.flatMap(item => {
+    const evidence = (item.evidence || [{sample_id: item.sample_id, quote: item.quote}]).filter(entry => entry.sample_id !== id)
+    return evidence.length ? [{...item, ...evidence[0], ...(item.evidence ? {evidence} : {})}] : []
+  })})
+  return <Collapse defaultActiveKey={bank.samples.length ? [] : ['samples']} items={[{key: 'samples', label: `参考原文 · ${bank.samples.length} 段`, children: <>
+    <p>自动提取和手动添加的范文统一保存在这里。每次最多选两段、合计不超过 2000 字符；优先使用已启用且标记优先的片段，其余按本章内容自动补充。多段都优先时按列表顺序选取。只学写法，不复用事实。</p>
+    {bank.samples.map((sample, i) => <div key={sample.id} style={{marginBottom: 20}}>
+      <Space wrap>
+        <Checkbox aria-label={`启用参考片段${i + 1}`} checked={sample.enabled} disabled={disabled} onChange={e => update(sample.id, {enabled: e.target.checked})}>
+          {sample.manual ? `片段 ${i + 1} · 手动添加` : `${sample.id} · 文件 ${sample.source} · 第 ${sample.start + 1} 字符起`}
+        </Checkbox>
+        <Checkbox aria-label={`优先使用参考片段${i + 1}`} checked={!!sample.preferred} disabled={disabled} onChange={e => update(sample.id, {preferred: e.target.checked})}>优先使用</Checkbox>
+        <Button size="small" danger aria-label={`删除参考片段${i + 1}`} disabled={disabled} onClick={() => remove(sample.id)}>删除</Button>
+      </Space>
+      {sample.manual ? <TextArea aria-label={`手动参考片段${i + 1}`} value={sample.text} onChange={e => update(sample.id, {text: e.target.value})} rows={5} maxLength={1000} showCount autoFocus={!sample.text} disabled={disabled} style={{marginTop: 8}} placeholder="粘贴你想参考的原文片段，随后点击上方保存文风。" />
+        : <pre style={{whiteSpace: 'pre-wrap', fontFamily: 'inherit', maxHeight: 180, overflow: 'auto', marginTop: 8}}>{sample.text}</pre>}
+      {bank.observations.filter(item => item.sample_id === sample.id || item.evidence?.some(entry => entry.sample_id === sample.id)).map((item, n) => <p key={n}><Tag>{item.dimension || item.kind}</Tag>{item.advice}<br />
+        {(item.evidence || [{sample_id: item.sample_id, quote: item.quote}]).filter(entry => entry.sample_id === sample.id).map((entry, j) => <Text key={j} type="secondary">建议依据（不写入指南）：「{entry.quote}」<br /></Text>)}
+      </p>)}
+    </div>)}
+    <Button aria-label="添加参考片段" icon={<PlusOutlined />} disabled={disabled || bank.samples.filter(sample => sample.manual).length >= 12 || bank.samples.length >= 24}
+      onClick={() => onChange({...bank, samples: [...bank.samples, {id: 'manual-' + crypto.randomUUID(), source: 0, start: 0, text: '', enabled: true, manual: true, preferred: true}]})}>添加参考片段</Button>
+    <p>添加、编辑、删除、启停与优先设置，都随文风一起保存。手动片段每段最多 1000 字符，最多 12 段。</p>
+  </>}]} />
+}
 
 interface LLMConfig {
   id: number
@@ -77,6 +113,10 @@ export default function NovelDetail() {
   const [styleGuide, setStyleGuide] = useState('')
   const [styleGuideInput, setStyleGuideInput] = useState('')
   const [extractingStyle, setExtractingStyle] = useState(false)
+  const [styleProfile, setStyleProfile] = useState<StyleProfile | null>(null)
+  const [styleRevision, setStyleRevision] = useState('')
+  const [styleCandidate, setStyleCandidate] = useState<StyleCandidate | null>(null)
+  const [savingStyle, setSavingStyle] = useState(false)
 
   // 审稿面板自行管理审稿与修订状态，这里只留章节刷新回调
 
@@ -99,7 +139,8 @@ export default function NovelDetail() {
     Promise.all([
       api.get(`/novels/${id}`),
       api.get('/llm-configs'),
-    ]).then(([n, l]) => {
+      api.get(`/novels/${id}/style/profile`),
+    ]).then(([n, l, style]) => {
       setNovel(n.data)
       setAllConfigs(l.data)
       let saved: Record<string, string> = {}
@@ -113,8 +154,10 @@ export default function NovelDetail() {
       }
       setTaskConfigs(saved)
       setEmbeddingConfig(n.data.embedding_config || '')
-      setStyleRefText(n.data.style_reference || '')
-      setStyleGuide(n.data.style_guide || '')
+      setStyleGuide(style.data.style_guide || '')
+      setStyleProfile(style.data.profile)
+      setStyleRevision(style.data.revision)
+      setStyleCandidate(null)
       settingsForm.setFieldsValue(n.data)
     }).catch(() => message.error('加载小说失败'))
       .finally(() => setLoading(false))
@@ -193,8 +236,8 @@ export default function NovelDetail() {
         content: text,
         llm_config: taskConfigs.architecture
       })
-      setStyleGuide(res.data.style_guide)
-      message.success('文风指南提取完成')
+      setStyleCandidate(res.data)
+      message.success('候选已生成，核对并保存后才会用于写作')
       return true
     } catch (err: any) {
       message.error('文风提取失败: ' + (err.response?.data?.message || err.message))
@@ -204,25 +247,20 @@ export default function NovelDetail() {
     }
   }
 
-  const saveStyleReference = async (text: string) => {
-    if (!text || text.trim().length === 0) {
-      message.error('内容不能为空')
-      return
-    }
-    if (text.length > 1000) {
-      message.error('范文片段不能超过1000字')
-      return
-    }
+  const saveStyleGuide = async (candidate?: StyleCandidate) => {
+    setSavingStyle(true)
     try {
-      await api.put(`/novels/${id}/style/reference`, { content: text })
-      message.success('范文片段已保存')
-    } catch (err: any) {
-      message.error('保存失败: ' + (err.response?.data?.message || err.message))
-    }
+      const {data} = await api.put(`/novels/${id}/style/guide`, candidate || {
+        style_guide: styleGuide, profile: styleProfile, base_revision: styleRevision,
+      })
+      setStyleGuide(data.style_guide); setStyleProfile(data.profile); setStyleRevision(data.revision)
+      setNovel((current: any) => ({...current, style_guide: data.style_guide}))
+      setStyleCandidate(null)
+      await refreshWritingDesk()
+      message.success('文风已保存，后续生成使用这份指南与已启用范文')
+    } catch (err: any) { message.error(err.response?.data?.message || err.message) }
+    finally { setSavingStyle(false) }
   }
-
-  const [styleRefText, setStyleRefText] = useState('')
-  const [savingStyleRef, setSavingStyleRef] = useState(false)
 
   const handleTaskConfigChange = async (task: string, configName: string) => {
     const next = { ...taskConfigs, [task]: configName }
@@ -423,6 +461,7 @@ export default function NovelDetail() {
             title="上传范文 → 提取文风指南"
             extra={
               <Button
+                aria-label="提取文风指南"
                 loading={extractingStyle}
                 onClick={() => extractStyleGuide(styleGuideInput)}
                 disabled={extractingStyle}
@@ -433,7 +472,7 @@ export default function NovelDetail() {
           >
             <Spin spinning={extractingStyle} tip="AI 正在分析文风特征...">
               <div style={{ fontSize: 13, color: '#8e929f', marginBottom: 8 }}>
-                上传一个或多个 .txt 文件，AI 会自动提取其写作风格特征：
+                上传一个或多个 .txt 文件，重点提炼叙述语气、对话语气，以及场景、人物外貌体态和动作的描写方式。原文会分散取样，确认前不会覆盖已保存文风：
               </div>
               <Upload
                 accept=".txt"
@@ -462,60 +501,25 @@ export default function NovelDetail() {
                 placeholder="拖入或选择 .txt 文件后内容会出现在这里，点击「提取文风指南」按钮由 AI 分析...&#10;&#10;你也可以直接粘贴范文内容"
                 style={{ fontFamily: 'inherit', fontSize: 14, marginTop: 12 }}
               />
-              {styleGuide && (
-                <>
-                  <Divider style={{ margin: '16px 0' }}>
-                    <span style={{ color: '#52c41a' }}>✓ 已提取的文风指南（注入 System Prompt）</span>
-                  </Divider>
-                  <pre style={{
-                    whiteSpace: 'pre-wrap',
-                    fontFamily: 'inherit',
-                    fontSize: 13,
-                    lineHeight: 1.8,
-                    color: '#aeb0b8',
-                    background: '#1d2b20',
-                    padding: 16,
-                    borderRadius: 6,
-                    border: '1px solid #39553a',
-                    maxHeight: 300,
-                    overflow: 'auto',
-                  }}>
-                    {styleGuide}
-                  </pre>
-                </>
-              )}
             </Spin>
           </Card>
 
-          <Card
-            title="范文片段（Few-shot）"
-            extra={
-              <Button
-                loading={savingStyleRef}
-                onClick={async () => {
-                  setSavingStyleRef(true)
-                  await saveStyleReference(styleRefText)
-                  setSavingStyleRef(false)
-                }}
-                disabled={!styleRefText || styleRefText.length > 1000}
-              >
-                保存
-              </Button>
-            }
-          >
-            <div style={{ fontSize: 13, color: '#8e929f', marginBottom: 8 }}>
-              粘贴一段范文原文（1000 字以内），生成章节时会作为文笔示范放在小说设定之前，只学写法、不用其中的人物和情节：
-            </div>
-            <TextArea
-              value={styleRefText}
-              onChange={(e) => setStyleRefText(e.target.value)}
-              rows={6}
-              maxLength={1000}
-              showCount
-              placeholder="在此粘贴范文原文片段（不超过 1000 字）..."
-              style={{ fontFamily: 'serif', fontSize: 14 }}
-            />
+          <Card title="文风指南 · 提炼后的写法" extra={<Button aria-label="保存文风" loading={savingStyle} disabled={!styleRevision || extractingStyle || !!styleCandidate} onClick={() => saveStyleGuide()}>保存文风</Button>}>
+            <p>这份指南将完整用于正文生成，不再逐章压缩成几条规则。本次要求与作者批注优先；留空可停用指南；下方统一管理参考原文，并一起保存。</p>
+            <TextArea aria-label="文风指南" value={styleGuide} onChange={e => setStyleGuide(e.target.value)} rows={10} maxLength={20000} disabled={savingStyle || extractingStyle || !!styleCandidate} placeholder="可以填写叙述语气、对白口吻，以及场景、外貌和动作的描写偏好，也可以从范文提取后编辑。" />
+            <div style={{marginTop: 16}}><StyleReferenceBank profile={styleProfile} onChange={setStyleProfile} disabled={savingStyle || extractingStyle || !!styleCandidate} /></div>
           </Card>
+          <Modal title="文风候选 · 确认后启用" open={!!styleCandidate} width={900} maskClosable={false}
+            onCancel={() => { if (!savingStyle) setStyleCandidate(null) }}
+            footer={<Space><Button disabled={savingStyle} onClick={() => setStyleCandidate(null)}>放弃候选</Button><Button type="primary" loading={savingStyle} onClick={() => styleCandidate && saveStyleGuide(styleCandidate)}>采纳并保存文风</Button></Space>}>
+            <p>下方是提炼后的写法建议，可以直接修改。原文依据收在“参考原文”里，不会拼进这份指南。确认保存后启用，当前已保存文风保持生效。</p>
+            {!!styleCandidate?.skipped_count && <p>已保留 {styleCandidate.profile.observations.length} 条有原文依据的建议，另有 {styleCandidate.skipped_count} 条不符合写法范围或依据规范，已跳过。</p>}
+            {!!styleCandidate?.missing_dimensions?.length && <p>本次未提炼到：{styleCandidate.missing_dimensions.join('、')}。这些方面未补造规则；可补充对应描写的范文后重新提取。</p>}
+            <TextArea aria-label="候选文风指南" value={styleCandidate?.style_guide || ''} maxLength={20000} rows={10} disabled={savingStyle}
+              onChange={e => setStyleCandidate(current => current && {...current, style_guide: e.target.value})} />
+            <div style={{marginTop: 16}}><StyleReferenceBank profile={styleCandidate?.profile || null} onChange={profile => setStyleCandidate(current => current && {...current, profile})} disabled={savingStyle} /></div>
+          </Modal>
+
         </Space>
       ),
     },

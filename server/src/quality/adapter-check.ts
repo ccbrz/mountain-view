@@ -50,6 +50,28 @@ server.listen(0, async () => {
     mode = 'cut'
     await assert.rejects(invokeLLM(cfg, '', '任务'), /中途断开/)
     assert.equal(await invokeLLM({ ...cfg, base_url: 'https://other.invalid/v1' }, '', '任务'), '你好')
+    const kayra = {...cfg, model_name: 'kayra-v1', max_tokens: 500}
+    let nativeCalls = 0, complete = true
+    globalThis.fetch = (async (url: any, options: any) => {
+      assert.equal(String(url), 'https://text.novelai.net/ai/generate')
+      const body = JSON.parse(options.body)
+      assert.equal(body.parameters.max_length, 250)
+      assert.equal(body.parameters.prefix, 'special_instruct')
+      assert.equal(body.parameters.use_string, true)
+      nativeCalls++
+      if (nativeCalls % 2 === 1) return Response.json({output: '身份：工程师。\nEND_OF_'})
+      assert(body.input.endsWith('身份：工程师。\nEND_OF_'))
+      return Response.json({output: complete ? 'RESPONSE\n多余文本不应保留' : '仍未完成'})
+    }) as typeof fetch
+    assert.equal(await invokeLLM(kayra, '保留事实', '整理设定'), '身份：工程师。')
+    assert.equal(nativeCalls, 2)
+    complete = false
+    await assert.rejects(invokeLLM(kayra, '', '整理设定'), OutputTruncatedError)
+    assert.equal(nativeCalls, 4)
+    await assert.rejects(invokeLLM({...kayra, max_tokens: 2001}, '', '整理设定'), /最多 2000/)
+    await assert.rejects(invokeLLM(kayra, '', '很长'.repeat(1500)), /上下文不足/)
+    assert.equal(nativeCalls, 4)
+    console.log('✓ Kayra 原生接口、分段衔接、结束标记与上下文/输出边界保护通过')
     console.log('✓ JSON/SSE 解析、NovelAI 流式请求、截断保护及其他服务兼容性通过')
   } catch (err) {
     console.error(err)

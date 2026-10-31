@@ -1,7 +1,7 @@
 /** Canonical state shared by the writing desk and the retained review tools. */
 export const WRITER_DOC = 'writing_desk'
 export interface LoreEntry { id: string; title: string; text: string; keys: string[]; enabled: boolean; always_on: boolean; category: string }
-export interface WriterSettings { schema_version?: number; writing_template_version?: number; model_id: string; system_prompt: string; memory: string; memory_through_chapter?: number; lorebook: LoreEntry[]; temperature: number; max_output_tokens: number; recent_context_chars: number; context_tokens: number }
+export interface WriterSettings { schema_version?: number; writing_template_version?: number; model_id: string; lore_model_id?: string; system_prompt: string; memory: string; memory_through_chapter?: number; lorebook: LoreEntry[]; temperature: number; max_output_tokens: number; recent_context_chars: number; context_tokens: number }
 export function unifiedWriterState(db: any, novelId: number): WriterSettings | null {
   const row = db.prepare('SELECT content FROM novel_docs WHERE novel_id=? AND doc_type=?').get(novelId, WRITER_DOC)
   if (!row) return null

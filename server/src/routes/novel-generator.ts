@@ -17,6 +17,7 @@ import { addLLMCallLog, getLogsByNovelId, clearLogsByNovelId } from '../llm/logs
 
 import { buildModelWriterContext, requireWriterBudget } from '../llm/writer-context'
 import { unifiedWriterState, writerDoc } from '../llm/writer-state'
+import { STYLE_DOC, LEGACY_STYLE_SAMPLE, STYLE_DIMENSIONS, styleAnalysisInput, sampleStyleSources, parseStyleAnalysis, renderStyleGuide, readStyleProfile, validateStyleProfile, styleRevision, selectStyleSamples } from '../llm/writer-style'
 import { chapterEvidence } from '../llm/chapter-evidence'
 import { checkContinuity, ContinuityConflict } from '../llm/continuity'
 
@@ -199,67 +200,58 @@ router.get('/:id/llm-configs', authenticate, (_req: AuthRequest, res) => {
   res.json(configs)
 })
 
-// ---------- POST /:id/style/guide ----------
-// 上传 txt 文件内容 → AI 总结文风指南 → 保存到 style_guide
-
-/** 前端多个文件用这个分隔符拼接 */
-const SAMPLE_SEP = '\n\n---\n\n'
-
-/**
- * 范文总长压到 budget 以内。多个文件时平分预算——只截前 N 字的话后面的文件一个字都进不去；
- * 短文件用不完的份额留给长文件。截断处退到最近的句末，不给模型半句话。
- */
-function fitStyleSamples(content: string, budget: number): string {
-  if (content.length <= budget) return content
-  const parts = content.split(SAMPLE_SEP)
-  const caps = new Map<number, number>()
-  let left = budget - SAMPLE_SEP.length * (parts.length - 1)
-  // 从短到长分配：每个文件拿「剩余预算 / 剩余文件数」和自身长度中较小的那个
-  parts.map((p, i) => [p.length, i]).sort((a, b) => a[0] - b[0]).forEach(([len, i], k, arr) => {
-    const cap = Math.min(len, Math.floor(left / (arr.length - k)))
-    caps.set(i, cap)
-    left -= cap
-  })
-  return parts.map((p, i) => {
-    const cap = caps.get(i)!
-    if (p.length <= cap) return p
-    const head = p.slice(0, cap)
-    const end = Math.max(...['。', '！', '？', '…', '」', '”', '\n'].map((c) => head.lastIndexOf(c)))
-    return end > cap / 2 ? head.slice(0, end + 1) : head
-  }).join(SAMPLE_SEP)
-}
+// Extraction is a preview. Only explicit adoption changes the author's style.
+router.get('/:id/style/profile', authenticate, (req: AuthRequest, res) => {
+  const db = getDB(), novel = getNovelOrForbid(db, req.params.id, req)
+  if (!novel) return res.status(404).json({message: '小说不存在或无权限'})
+  res.json({style_guide: novel.style_guide || '', profile: readStyleProfile(db, novel.id), revision: styleRevision(db, novel)})
+})
 
 router.post('/:id/style/guide', authenticate, async (req: AuthRequest, res) => {
-  const db = getDB()
-  const novel = getNovelOrForbid(db, req.params.id, req)
-  if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
-
+  const db = getDB(), novel = getNovelOrForbid(db, req.params.id, req)
+  if (!novel) return res.status(404).json({message: '小说不存在或无权限'})
   const config = getLLMConfigForTask(novel, req, 'architecture')
-  if (!config) return res.status(400).json({ message: '请先选择 LLM 配置' })
-
-  const { content } = req.body
-  if (!content || content.trim().length < 100) {
-    return res.status(400).json({ message: '范文内容太短，请至少提供100字以上的文本' })
+  if (!config) return res.status(400).json({message: '请先选择文风分析模型'})
+  const content = req.body?.content
+  if (typeof content !== 'string' || content.trim().length < 100 || content.length > 1000000) {
+    return res.status(400).json({message: '请提供 100 至 100 万字符的范文'})
   }
-
+  const base_revision = styleRevision(db, novel)
   try {
-    const ctx = { novel_id: novel.id, task: 'extract-style' }
-    const truncated = fitStyleSamples(content, 15000)
-
-    const styleGuide = await invokeWithRetry(
-      config,
-      P.SYSTEM_STYLE_EXTRACT,
-      P.USER_STYLE_EXTRACT(truncated),
-      3,
-      ctx
-    )
-
-    db.prepare('UPDATE novels SET style_guide = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(styleGuide, novel.id)
-
-    res.json({ message: '文风指南提取完成', style_guide: styleGuide })
+    const samples = sampleStyleSources(content)
+    const raw = await invokeWithRetry({...config, temperature: Math.min(config.temperature, 0.3)}, P.SYSTEM_STYLE_EXTRACT,
+      P.USER_STYLE_EXTRACT(styleAnalysisInput(samples)), 1,
+      {novel_id: novel.id, task: 'extract-style'})
+    let skipped_count = 0
+    const profile = parseStyleAnalysis(raw, samples, () => { skipped_count++ }, true)
+    profile.samples.unshift(...(readStyleProfile(db, novel.id)?.samples.filter(s => s.manual) || []))
+    res.json({style_guide: renderStyleGuide(profile), profile, base_revision, skipped_count, missing_dimensions: STYLE_DIMENSIONS.filter(d => !profile.observations.some(o => o.dimension === d))})
   } catch (err: any) {
-    res.status(err.status || 500).json({ message: `文风提取失败: ${err.message}` })
+    const detail = String(err.message || '提取失败')
+    res.status(err.status || 502).json({message: config.api_key ? detail.split(config.api_key).join('[REDACTED]') : detail})
   }
+})
+
+router.put('/:id/style/guide', authenticate, (req: AuthRequest, res) => {
+  const db = getDB(), novel = getNovelOrForbid(db, req.params.id, req)
+  if (!novel) return res.status(404).json({message: '小说不存在或无权限'})
+  const {style_guide, base_revision, profile} = req.body || {}
+  if (typeof style_guide !== 'string' || style_guide.length > 20000 || typeof base_revision !== 'string') {
+    return res.status(400).json({message: '文风指南最多 20000 字符，请先加载当前版本'})
+  }
+  if (base_revision !== styleRevision(db, novel)) return res.status(409).json({message: '文风已在其他页面修改，请重新加载后核对；本次编辑尚未覆盖已存内容'})
+  try {
+    const validated = profile === undefined ? undefined : validateStyleProfile(profile)
+    db.transaction(() => {
+      db.prepare('UPDATE novels SET style_guide=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(style_guide, novel.id)
+      if (validated !== undefined) db.prepare("UPDATE novels SET style_reference='' WHERE id=?").run(novel.id)
+      if (validated) saveDoc(db, novel.id, STYLE_DOC, JSON.stringify(validated))
+      else if (validated === null) db.prepare('DELETE FROM novel_docs WHERE novel_id=? AND doc_type=?').run(novel.id, STYLE_DOC)
+      bumpContextRevision(db, novel.id)
+    })()
+    const current = getNovelOrForbid(db, req.params.id, req)!
+    res.json({style_guide, profile: readStyleProfile(db, novel.id), revision: styleRevision(db, current)})
+  } catch (err: any) { res.status(400).json({message: String(err.message || '保存失败')}) }
 })
 
 // ---------- POST /:id/polish/character ----------
@@ -408,24 +400,26 @@ router.post('/:id/chapters/:num/outline-versions/:versionId/restore', authentica
 })
 
 // ---------- PUT /:id/style/reference ----------
-// 上传范文片段（≤1000 字）→ 保存到 style_reference，用于 few-shot
-
-router.put('/:id/style/reference', authenticate, async (req: AuthRequest, res) => {
-  const db = getDB()
-  const novel = getNovelOrForbid(db, req.params.id, req)
-  if (!novel) return res.status(404).json({ message: '小说不存在或无权限' })
-
-  const { content } = req.body
-  if (!content || content.trim().length === 0) {
-    return res.status(400).json({ message: '内容不能为空' })
-  }
-  if (content.length > 1000) {
-    return res.status(400).json({ message: '范文片段不能超过1000字' })
-  }
-
-  db.prepare('UPDATE novels SET style_reference = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(content, novel.id)
-
-  res.json({ message: '范文片段已保存' })
+// Compatibility for older clients; the unified sample bank remains authoritative.
+router.put('/:id/style/reference', authenticate, (req: AuthRequest, res) => {
+  const db = getDB(), novel = getNovelOrForbid(db, req.params.id, req)
+  if (!novel) return res.status(404).json({message: '小说不存在或无权限'})
+  const {content, base_revision} = req.body || {}
+  if (base_revision !== undefined && base_revision !== styleRevision(db, novel)) return res.status(409).json({message: '文风已在其他页面修改，请重新加载后核对'})
+  if (typeof content !== 'string' || content.length > 1000) return res.status(400).json({message: '范文片段不能超过1000字'})
+  const profile = readStyleProfile(db, novel.id) || {version: 1 as const, samples: [], observations: []}
+  profile.samples = profile.samples.filter(s => s.id !== LEGACY_STYLE_SAMPLE)
+  profile.observations = profile.observations.filter(o => o.sample_id !== LEGACY_STYLE_SAMPLE)
+  if (content.trim()) profile.samples.unshift({id: LEGACY_STYLE_SAMPLE, source: 0, start: 0, text: content, enabled: true, manual: true, preferred: true})
+  try {
+    const validated = validateStyleProfile(profile)!
+    db.transaction(() => {
+      saveDoc(db, novel.id, STYLE_DOC, JSON.stringify(validated))
+      db.prepare("UPDATE novels SET style_reference='', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(novel.id)
+      bumpContextRevision(db, novel.id)
+    })()
+    res.json({message: '范文片段已保存', revision: styleRevision(db, getNovelOrForbid(db, req.params.id, req))})
+  } catch (err: any) { res.status(400).json({message: String(err.message || '保存失败')}) }
 })
 
 // ---------- POST /:id/generate/architecture ----------
@@ -510,7 +504,7 @@ router.post('/:id/generate/chapter/:num', authenticate, async (req: AuthRequest,
     // 文风指南 → system prompt；范文片段 → user prompt 设定块之前（文案见 prompts.ts）
     const isFirst = chapterNum === 1
     const targetWords = novel.word_number || 2000
-    const styleRef = novel.style_reference || ''
+    const styleRef = selectStyleSamples(db, novel, `${chapter.title} ${outline}`).map(sample => sample.text).join('\n\n')
     const built = writerState ? requireWriterBudget(await buildModelWriterContext(db, novel, {
       chapter_idx: chapterNum, title: chapter.title, raw_script: outline, content: '', author_note: chapter.author_note || '', instruction: feedback,
       settings: {...writerState, max_output_tokens: config.max_tokens},

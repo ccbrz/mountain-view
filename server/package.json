@@ -15,6 +15,7 @@
     "test:outline-review": "tsx src/quality/outline-review-check.ts",
     "test:architecture": "tsx src/quality/architecture-check.ts",
     "test:chat": "tsx src/quality/chat-test-check.ts",
+    "test:writer-style": "tsx src/quality/writer-style-check.ts",
     "test:writer": "tsx src/quality/writer-check.ts",
     "test:writer-workflow": "tsx src/quality/writer-workflow-check.ts",
     "test:writer-memory": "tsx src/quality/writer-memory-check.ts"

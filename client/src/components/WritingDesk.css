@@ -251,3 +251,9 @@
 
 .lore-edit-form { margin: 0; padding: 0; border: 0; min-width: 0; }
 .lore-polish-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.lore-keyword-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.lore-keyword-tag { display: inline-flex; align-items: center; gap: 6px; margin: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.lore-keyword-tag button { border: 0; background: transparent; color: inherit; padding: 2px; cursor: pointer; flex-shrink: 0; }
+.lore-keyword-tag button:disabled { opacity: .4; cursor: default; }
+.lore-keyword-input { display: flex; align-items: center; gap: 6px; width: 100%; }
+.lore-keyword-input .ant-input { flex: 1; min-width: 0; }

@@ -17,7 +17,7 @@ import { reviewChapter, ReviewResult } from '../llm/review'
 import { revisePatchwise, ReviseResult } from '../llm/revise'
 import { auditRefinement, localIssues, issueNote, proseChars } from '../llm/writer-refinement'
 import { recordWriterMemory, memoryVersionStatus, memoryBeforeChapter, invalidateWriterMemory } from '../llm/writer-memory'
-import { OutputTruncatedError } from '../llm/adapter'
+import { OutputTruncatedError, isNovelAIKayra } from '../llm/adapter'
 
 const router = Router()
 const fail = (text: string) => { throw new Error(text) }
@@ -100,6 +100,10 @@ function validateSettings(value: any): Settings {
   if (!value || typeof value !== 'object') fail('写作设置无效')
   text(value.model_id, 100, '模型选择'); text(value.system_prompt, 50000, '写作要求'); text(value.memory, 100000, 'Memory')
   if (value.model_id && !getLLMConfigById(Number(value.model_id))) fail('模型配置不存在，请重新选择')
+  if (value.lore_model_id !== undefined) {
+    text(value.lore_model_id, 100, '设定生成模型')
+    if (value.lore_model_id && !getLLMConfigById(Number(value.lore_model_id))) fail('设定生成模型不存在，请重新选择')
+  }
   if (typeof value.temperature !== 'number' || !Number.isFinite(value.temperature) || value.temperature < 0 || value.temperature > 2) fail('温度范围 0–2')
   integer(value.max_output_tokens, 128, 32768, '输出上限'); integer(value.recent_context_chars, 0, 100000, '近期正文预算'); integer(value.context_tokens, 1024, 2000000, '上下文容量')
   if (value.memory_through_chapter !== undefined) integer(value.memory_through_chapter, 0, 999999, 'Memory 截至章节')
@@ -112,7 +116,7 @@ function validateSettings(value: any): Settings {
     if (typeof e.enabled !== 'boolean' || typeof e.always_on !== 'boolean') fail('设定开关无效')
     return { id: e.id, title: e.title, text: e.text, keys: e.keys, enabled: e.enabled, always_on: e.always_on, category: e.category }
   })
-  const clean = { schema_version: 2, writing_template_version: 3, model_id: value.model_id, system_prompt: value.system_prompt, memory: value.memory, ...(value.memory_through_chapter === undefined ? {} : {memory_through_chapter: value.memory_through_chapter}), lorebook, temperature: value.temperature, max_output_tokens: value.max_output_tokens, recent_context_chars: value.recent_context_chars, context_tokens: value.context_tokens }
+  const clean = { schema_version: 2, writing_template_version: 3, model_id: value.model_id, ...(value.lore_model_id ? {lore_model_id: value.lore_model_id} : {}), system_prompt: value.system_prompt, memory: value.memory, ...(value.memory_through_chapter === undefined ? {} : {memory_through_chapter: value.memory_through_chapter}), lorebook, temperature: value.temperature, max_output_tokens: value.max_output_tokens, recent_context_chars: value.recent_context_chars, context_tokens: value.context_tokens }
   if (JSON.stringify(clean).length > 300000) fail('写作设置过大，请精简')
   return clean
 }
@@ -143,7 +147,14 @@ function ensureChapter(novelId: number, idx: number) {
   return row
 }
 async function context(novel: any, input: any, kind = input.mode) {
-  const config = getLLMConfigById(Number(input.settings.model_id))
+  const config = getLLMConfigById(Number(kind === 'lore' ? input.settings.lore_model_id || input.settings.model_id : input.settings.model_id))
+  if (kind === 'lore' && config) {
+    const kayra = isNovelAIKayra(config)
+    input = {...input, settings: {...input.settings,
+      max_output_tokens: kayra ? Math.min(config.max_tokens, 2000) : input.settings.lore_model_id ? Math.min(config.max_tokens, input.settings.max_output_tokens) : input.settings.max_output_tokens,
+      context_tokens: kayra ? Math.min(input.settings.context_tokens, 8192) : input.settings.context_tokens,
+    }}
+  }
   return {...await buildModelWriterContext(getDB(), novel, input, config, kind), model: config ? publicModel(config) : null}
 }
 function sourceArtifact(novel: any, id: unknown, kind: string, source: any) {
@@ -359,8 +370,8 @@ for (const [path, kind] of [['/generate', 'generate'], ['/revise', 'revise'], ['
       }
       if (task === 'memory' && b.content !== chapterRow(n.id, b.chapter_idx)?.content) throw new ContextConflict('请先保存并确认本章正文，再整理记忆')
       if (task === 'memory') requireMemoryTime(b.settings, b.chapter_idx, 'write')
-      config = getLLMConfigById(Number(b.settings.model_id))
-      if (!config) fail('请在参数里选择已配置的创作模型')
+      config = getLLMConfigById(Number(task === 'lore' ? b.settings.lore_model_id || b.settings.model_id : b.settings.model_id))
+      if (!config) fail(task === 'lore' ? '请选择已配置的设定生成模型' : '请在参数里选择已配置的创作模型')
       if (kind === 'generate' && req.body.prepared_id !== undefined) {
         const prepared = sourceArtifact(n, req.body.prepared_id, 'prepare', b)
         if (prepared.preparation.conflicts.length) fail('写前发现材料冲突，请先核对 Memory、台本或设定，再生成正文')
@@ -369,7 +380,8 @@ for (const [path, kind] of [['/generate', 'generate'], ['/revise', 'revise'], ['
       }
       const ctx = requireWriterBudget(await context(n, input, task))
       if (input.preparation_warning) ctx.warnings.push(input.preparation_warning)
-      const completion = await invokeWithRetryResult({ ...config!, temperature: b.settings.temperature, max_tokens: b.settings.max_output_tokens }, ctx.system_prompt, ctx.user_prompt, 1, { novel_id: n.id, task: `writer:${task}:${b.chapter_idx}` }, kind === 'generate')
+      const temperature = task === 'lore' ? Math.min(.4, b.settings.lore_model_id ? config!.temperature : b.settings.temperature) : b.settings.temperature
+      const completion = await invokeWithRetryResult({ ...config!, temperature, max_tokens: ctx.budget.output_tokens }, ctx.system_prompt, ctx.user_prompt, 1, { novel_id: n.id, task: `writer:${task}:${b.chapter_idx}` }, kind === 'generate')
       const output = completion.text
       if (!output.trim() || output.includes('<think>')) fail('模型未返回有效正文')
       if (task === 'lore') {

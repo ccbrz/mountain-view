@@ -61,12 +61,12 @@ async function main() {
     const drafted = await req('/generate',{...input,prepared_id:prepared.artifact_id})
     assert.equal(drafted.content,response)
     const prompt = requests.at(-1)
-    assert(prompt.messages[0].content.includes(good.style_rules[0].rule))
-    assert(!prompt.messages[0].content.includes('文学评论家在此'))
+    assert(!prompt.messages[0].content.includes(good.style_rules[0].rule))
+    assert(prompt.messages[0].content.includes(style))
     assert(prompt.messages[1].content.includes('本章停笔点：艾拉报告通讯器线索。'))
     assert(prompt.messages[1].content.includes(good.facts[0].quote))
     assert(!prompt.messages[1].content.includes(input.content))
-    console.log('✓ 整章起点、顺序与落点显式传入；文风摘要有原文依据；过期核对不复用')
+    console.log('✓ 整章起点、顺序与落点显式传入；完整文风指南不被写前核对压缩；过期核对不复用')
 
     const checkedSource = {...input,content:drafted.content,incomplete:false}
     const issue = {layer:'故事',resolution:'local',evidence:[{source:'Lorebook · 老赵',quote:'老赵欠林星河一次撤离承诺。'}],dimension:'设定一致性',severity:'必改',problem:'撤离承诺的关系写反',quote:'林星河欠老赵一次撤离承诺。',suggestion:'按设定改成老赵欠林星河，不新增死伤背景。'}

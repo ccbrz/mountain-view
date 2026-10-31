@@ -1,7 +1,8 @@
+import { selectStyleSamples } from './writer-style'
 import { WriterSettings, LoreEntry, recentWriterProse } from './writer-state'
 import * as P from './prompts'
 import { LLMConfig } from './config'
-import { countInputTokens } from './adapter'
+import { countInputTokens, isNovelAIKayra } from './adapter'
 import { chapterContract, PREPARATION_SYSTEM, WriterPreparation } from './writer-preparation'
 
 export interface WriterInput {
@@ -77,7 +78,7 @@ export function buildWriterContext(db: any, novel: any, input: WriterInput, kind
   const add = (label: string, text: string, options: Partial<Block> = {}) => { if (text.trim()) blocks.push({label, text, ...options}) }
   const recent = ['memory', 'lore'].includes(kind) ? [] : recentWriterProse(db, novel.id, input.chapter_idx, s.recent_context_chars)
   const lore_status = ['memory', 'lore'].includes(kind) ? [] : selectWriterLore(s, input, kind, recent)
-  const style = input.preparation?.style_rules.length ? input.preparation.style_rules.map(r => '- ' + r.rule).join('\n') : novel.style_guide || ''
+  const style = novel.style_guide || ''
   let system = P.writerSystemPrompt(s.system_prompt, style, ['revise', 'patch', 'prepare'].includes(kind) ? undefined : novel.word_number || 2000)
   if (kind !== 'lore') add('Memory', s.memory)
   if (kind !== 'lore' && s.memory.trim() && s.memory_through_chapter !== undefined) add('Memory 记录时点', s.memory_through_chapter === 0 ? '开篇之前；本章台本尚未发生。' : `截至第 ${s.memory_through_chapter} 章结束，不代表待写章节开篇的状态。`)
@@ -87,7 +88,7 @@ export function buildWriterContext(db: any, novel: any, input: WriterInput, kind
     add('条目名称', input.lore_entry?.title || '')
     add('条目分类', input.lore_entry?.category || '未分类')
     add('待整理设定原文', input.lore_entry?.text || '')
-    add('本次任务', '在保留原意、全部具体信息与信息边界的前提下，整理结构并润色表达。只输出本条目的整理后正文。')
+    add('本次任务', '整理结构并润色已有细节，保留全部事实和关系方向。可增强措辞、质感与节奏，保留必要的描写，不压成摘要，也不逐项扩写。不补原文未说明的原因、目的、经历或功能；不强化性格程度，不替含混事实选定解释，删去重复评价和套话。只输出本条目的整理后正文。')
   } else if (kind === 'memory') {
     system = '你是小说事实记录员，只根据已确认正文和旧记忆整理事实，不创作情节。'
     add('本章已确认正文（唯一新事实来源）', input.content)
@@ -101,7 +102,11 @@ export function buildWriterContext(db: any, novel: any, input: WriterInput, kind
     recent.forEach((r, i) => add(`近期正文 · 第 ${r.chapter_number} 章`, r.content, {trim: 'start', priority: i / Math.max(recent.length, 1), chapter_number: r.chapter_number}))
     add('章节标题', input.title)
     add('本章完整台本（计划，不代表已发生）', input.raw_script)
-    if (novel.style_reference) add('范文参考（只学写法，不复用事实）', chars(novel.style_reference).slice(0, 1000).join(''), {trim: 'drop', priority: 10})
+    if (kind !== 'prepare') {
+      const query = [input.author_note, input.instruction, kind === 'revise' ? input.selected : input.raw_script,
+        kind === 'continue' ? tail(input.content, 1000) : ''].filter(Boolean).join('\n')
+      for (const sample of selectStyleSamples(db, novel, query)) add(`范文参考 · ${sample.id} · ${sample.kind}（只学写法，不复用事实）`, sample.text, {trim: 'drop', priority: 10})
+    }
     if (kind === 'revise') {
       add('选区前文（只读）', input.before || '', {trim: 'start', keep: 500, priority: 20})
       add('待修改选区', input.selected || '')
@@ -109,7 +114,6 @@ export function buildWriterContext(db: any, novel: any, input: WriterInput, kind
     } else if (kind !== 'write' && (kind !== 'prepare' || input.mode === 'continue')) add('本章现有正文', input.content, ['review', 'patch', 'audit'].includes(kind) ? {} : {trim: 'start', keep: 1000, priority: 20})
     if (kind === 'prepare') {
       system = PREPARATION_SYSTEM
-      add('待整理文风原文', novel.style_guide || '')
       add('固定写作要求（保留原文）', s.system_prompt)
       add('写作位置与范围', chapterContract(input.chapter_idx, input.raw_script, input.mode || 'write'))
     } else if (kind === 'review') {
@@ -126,13 +130,12 @@ export function buildWriterContext(db: any, novel: any, input: WriterInput, kind
     if (['write', 'continue'].includes(kind)) {
       add('本章执行约定', chapterContract(input.chapter_idx, input.raw_script, kind))
       if (input.preparation?.facts.length) add('写前核对（引用原始资料，不新增设定）', input.preparation.facts.map(f => `${f.source}「${f.quote}」：${f.note}`).join('\n'))
-      if (input.preparation?.style_rules.length) add('文风整理依据', input.preparation.style_rules.map(r => `「${r.quote}」→${r.rule}`).join('\n'))
     }
     // Chapter-specific guidance is adjacent to the task, after long prose and examples.
     add('小说写作指引', novel.guidance || '')
     add('作者批注', input.author_note)
     add('修改要求', input.instruction || '')
-    const task = kind === 'prepare' ? '核对本章起点、Memory 时间点、角色知情边界与文风。只输出指定 JSON，不写正文、不改台本。'
+    const task = kind === 'prepare' ? '核对本章起点、Memory 时间点与角色知情边界。只输出指定 JSON，不写正文、不改台本。'
       : kind === 'review' ? '逐条核对以上编号台本与本章正文，结合当前 Memory 和激活设定审稿。只输出符合审稿规范的 JSON，必须包含 beats、issues 和 scores（prose、consistency、webnovel）。'
       : kind === 'patch' ? '仅落实修改要求，已知但保留的问题不要动。只输出查找—替换补丁 JSON 数组，每项包含 note、find、replace；find 必须逐字引用原文并唯一，不输出正文或解释。'
       : kind === 'audit' ? '核验修改要求中编号补丁的候选结果。每项必须独立安全，不得依赖其他补丁被采用。只返回逐条核验 JSON，指出仍需作者决定的问题；不修改正文。'
@@ -156,7 +159,7 @@ export function buildWriterContext(db: any, novel: any, input: WriterInput, kind
 /** Prefer the model's tokenizer before dropping any prose or lore. */
 export async function buildModelWriterContext(db: any, novel: any, input: WriterInput, config: LLMConfig | null | undefined, kind = input.mode || 'write') {
   const conservative = buildWriterContext(db, novel, input, kind)
-  if (!config || new URL(config.base_url).hostname !== 'text.novelai.net') return conservative
+  if (!config || isNovelAIKayra(config) || new URL(config.base_url).hostname !== 'text.novelai.net') return conservative
   try {
     const full = buildWriterContext(db, novel, input, kind, () => 0)
     // At most two count requests: full materials first, then the conservative trimmed candidate.

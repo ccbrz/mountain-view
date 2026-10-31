@@ -56,8 +56,46 @@ function parseResponse(text: string): any {
 
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
+export function isNovelAIKayra(config: LLMConfig) {
+  return new URL(config.base_url).hostname === 'text.novelai.net' && config.model_name === 'kayra-v1'
+}
+
+// Kayra uses native text completion, not the GLM/Xialong chat endpoint.
+// Native responses have no finish_reason: require an explicit end marker before accepting an edit.
+async function invokeKayra(config: LLMConfig, messages: ChatMessage[], headers: Record<string, string>, signal: AbortSignal) {
+  if (config.max_tokens > 2000) throw new Error('Kayra 此入口的输出上限最多 2000 tokens，请在模型管理中调整；每段最多 250 tokens。')
+  const marker = 'END_OF_RESPONSE'
+  const prompt = `{ ${messages.map(m => m.content).join('\n\n')}\n\n请用简体中文输出结果。全部完成后单独一行输出 ${marker}，随后停止，不复述要求。 }\n`
+  let content = ''
+  // ponytail: at most eight native calls, bounded by the model config's total output budget.
+  for (let left = config.max_tokens; left > 0;) {
+    const max_length = Math.min(250, left)
+    const input = prompt + content
+    if (Buffer.byteLength(input, 'utf8') + max_length + 512 > 8192) throw new Error('Kayra 上下文不足，请缩短设定原文后重试；原设定保留。')
+    const response = await fetch('https://text.novelai.net/ai/generate', {
+      method: 'POST', headers, signal,
+      body: JSON.stringify({model: config.model_name, input, parameters: {
+        use_string: true, prefix: 'special_instruct', max_length, temperature: Math.max(.1, config.temperature), repetition_penalty: 1.1, repetition_penalty_range: 2048, logit_bias_exp: [],
+      }}),
+    })
+    if (!response.ok) throw new Error(`LLM API error ${response.status}: ${await response.text()}`)
+    const data: any = await response.json()
+    if (typeof data.output !== 'string' || !data.output) throw new Error('Kayra 未返回有效文本，原内容保留。')
+    content += data.output
+    const end = content.search(new RegExp(`(?:^|\\n)${marker}`))
+    if (end >= 0) {
+      content = content.slice(0, end).trim()
+      if (!content) throw new Error('Kayra 返回了空内容')
+      return {content, refusal: '', finish_reason: 'stop'}
+    }
+    left -= max_length
+  }
+  return {content, refusal: '', finish_reason: 'length'}
+}
+
 /** Counts prompt text, excluding chat framing (the caller reserves a separate margin). */
 export async function countInputTokens(config: LLMConfig, system: string, user: string): Promise<number | undefined> {
+  if (isNovelAIKayra(config)) return undefined
   if (new URL(config.base_url).hostname !== 'text.novelai.net') return undefined
   const response = await fetch(`${config.base_url.replace(/\/+$/, '')}/internal/token-count`, {
     method: 'POST',
@@ -98,6 +136,7 @@ export async function invokeChat(
   const timer = setTimeout(() => controller.abort(), (config.timeout || 600) * 1000)
 
   try {
+    if (isNovelAIKayra(config)) return await invokeKayra(config, messages, headers, controller.signal)
     const res = await fetch(url, {
       method: 'POST',
       headers,
