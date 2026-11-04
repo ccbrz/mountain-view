@@ -17,13 +17,19 @@ async function seed() {
   db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)').run('admin', hash, 'admin')
 
   db.prepare('INSERT INTO roles (name, description, permissions) VALUES (?, ?, ?)').run(
-    'admin', '管理员', JSON.stringify(['users:manage', 'roles:manage', 'content:manage', 'settings:manage'])
+    'admin',
+    '管理员',
+    JSON.stringify(['users:manage', 'roles:manage', 'content:manage', 'settings:manage']),
   )
   db.prepare('INSERT INTO roles (name, description, permissions) VALUES (?, ?, ?)').run(
-    'editor', '编辑者', JSON.stringify(['content:manage'])
+    'editor',
+    '编辑者',
+    JSON.stringify(['content:manage']),
   )
   db.prepare('INSERT INTO roles (name, description, permissions) VALUES (?, ?, ?)').run(
-    'user', '普通用户', JSON.stringify([])
+    'user',
+    '普通用户',
+    JSON.stringify([]),
   )
 
   console.log('种子数据创建成功！')

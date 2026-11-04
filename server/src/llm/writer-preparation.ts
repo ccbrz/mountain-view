@@ -3,9 +3,14 @@ import type { WriterSettings } from './writer-state'
 
 export function requireMemoryTime(settings: WriterSettings, chapter: number, mode: string) {
   const through = settings.memory_through_chapter
-  if (settings.memory.trim() && through === undefined) throw new Error('Memory 尚未记录截至章节。请使用“恢复章前记忆”选择可核验的历史版本，或根据已确认正文整理并保存记忆；系统不会猜测旧记忆的时间点。')
+  if (settings.memory.trim() && through === undefined)
+    throw new Error(
+      'Memory 尚未记录截至章节。请使用“恢复章前记忆”选择可核验的历史版本，或根据已确认正文整理并保存记忆；系统不会猜测旧记忆的时间点。',
+    )
   if (settings.memory.trim() && through !== undefined && (mode === 'write' ? through >= chapter : through > chapter)) {
-    throw new Error(`当前 Memory 已记录到第 ${through} 章，不能作为第 ${chapter} 章${mode === 'write' ? '开篇' : '续写'}的前情。请预览并恢复本章开始前的记忆，再生成；原记忆会保留在历史中。`)
+    throw new Error(
+      `当前 Memory 已记录到第 ${through} 章，不能作为第 ${chapter} 章${mode === 'write' ? '开篇' : '续写'}的前情。请预览并恢复本章开始前的记忆，再生成；原记忆会保留在历史中。`,
+    )
   }
 }
 
@@ -24,42 +29,82 @@ export const PREPARATION_SYSTEM = `你是中文小说写前编辑，只整理本
 只输出 JSON：{"facts":[{"source":"材料区块名称","quote":"逐字原句","note":"约束与知情边界"}],"style_rules":[],"conflicts":[{"source":"材料区块名称","quote":"逐字冲突原句","plan_quote":"台本中的逐字原句","problem":"具体冲突及待核对项"}]}。
 引用必须逐字存在，source 使用材料区块的原始名称。没有问题就返回空数组，不凑数。直接输出简短 JSON，全部结果不超过1000字。`
 
-export function parsePreparation(raw: string, blocks: { label: string; text: string }[], plan: string, _style: string): WriterPreparation {
+export function parsePreparation(
+  raw: string,
+  blocks: { label: string; text: string }[],
+  plan: string,
+  _style: string,
+): WriterPreparation {
   // GLM sometimes emits a full-width colon with a missing key quote. Only repair known keys.
   const obj = parseLooseJSON<any>(raw.replace(/"(source|quote|note|plan_quote|problem|rule)：/g, '"$1":"'), '{')
   const valid = (v: any, max: number) => typeof v === 'string' && !!v.trim() && v.length <= max
-  if (!obj || !['facts', 'style_rules', 'conflicts'].every(key => Array.isArray(obj[key]))) throw new Error('写前核对格式无效，请重试；尚未生成或修改正文')
+  if (!obj || !['facts', 'style_rules', 'conflicts'].every(key => Array.isArray(obj[key])))
+    throw new Error('写前核对格式无效，请重试；尚未生成或修改正文')
   const source = (item: any) => {
     const label = item.source.replace(/^【|】$/g, '')
-    return blocks.find(b => (b.label === label || b.label.replace(/^Lorebook · /, '设定 · ') === label) && originalQuote(b.text, item.quote))
+    return blocks.find(
+      b =>
+        (b.label === label || b.label.replace(/^Lorebook · /, '设定 · ') === label) &&
+        originalQuote(b.text, item.quote),
+    )
   }
   const sourceQuote = (item: any) => item && valid(item.source, 600) && valid(item.quote, 800) && source(item)
-  if (obj.facts.length > 8 || obj.style_rules.length > 8 || obj.conflicts.length > 4 ||
-      obj.facts.some((v: any) => !sourceQuote(v) || !valid(v.note, 400)) ||
-      obj.conflicts.some((v: any) => !sourceQuote(v) || !valid(v.problem, 400) || !valid(v.plan_quote, 800) || !originalQuote(plan, v.plan_quote))) {
+  if (
+    obj.facts.length > 8 ||
+    obj.style_rules.length > 8 ||
+    obj.conflicts.length > 4 ||
+    obj.facts.some((v: any) => !sourceQuote(v) || !valid(v.note, 400)) ||
+    obj.conflicts.some(
+      (v: any) =>
+        !sourceQuote(v) || !valid(v.problem, 400) || !valid(v.plan_quote, 800) || !originalQuote(plan, v.plan_quote),
+    )
+  ) {
     throw new Error('写前核对引用无法在原始材料中定位，请重试；尚未生成或修改正文')
   }
   return {
-    facts: obj.facts.map((v: any) => ({source: source(v)!.label, quote: originalQuote(source(v)!.text, v.quote)!, note: v.note})),
+    facts: obj.facts.map((v: any) => ({
+      source: source(v)!.label,
+      quote: originalQuote(source(v)!.text, v.quote)!,
+      note: v.note,
+    })),
     style_rules: [], // Legacy responses cannot replace the author's confirmed guide.
-    conflicts: obj.conflicts.map((v: any) => ({source: source(v)!.label, quote: originalQuote(source(v)!.text, v.quote)!, plan_quote: originalQuote(plan, v.plan_quote)!, problem: v.problem})),
+    conflicts: obj.conflicts.map((v: any) => ({
+      source: source(v)!.label,
+      quote: originalQuote(source(v)!.text, v.quote)!,
+      plan_quote: originalQuote(plan, v.plan_quote)!,
+      problem: v.problem,
+    })),
   }
 }
 
 /** Ignore only whitespace/emphasis markers, then recover the exact original span. No fuzzy facts. */
 function originalQuote(text: string, quote: string): string | undefined {
   if (text.includes(quote)) return quote
-  let compact = ''; const offsets: number[] = []
-  for (let i = 0; i < text.length; i++) if (!/[\s*_`]/.test(text[i])) { compact += text[i]; offsets.push(i) }
-  const target = quote.replace(/[\s*_`]/g, ''), start = target ? compact.indexOf(target) : -1
+  let compact = ''
+  const offsets: number[] = []
+  for (let i = 0; i < text.length; i++)
+    if (!/[\s*_`]/.test(text[i])) {
+      compact += text[i]
+      offsets.push(i)
+    }
+  const target = quote.replace(/[\s*_`]/g, ''),
+    start = target ? compact.indexOf(target) : -1
   return start < 0 ? undefined : text.slice(offsets[start], offsets[start + target.length - 1] + 1)
 }
 
 /** The order comes from the author's text; the model cannot reorder the contract. */
 export function outlineBeats(outline: string): string[] {
   const clean = (s: string) => s.replace(/^\s*(?:\d+[.、)）]|[-*•])\s*/, '').trim()
-  let beats = outline.split('\n').filter(l => !/^\s*(?:【场景[^】]*】|发生[:：]\s*$|不揭示[:：])/.test(l)).map(clean).filter(Boolean)
-  if (beats.length === 1) beats = beats[0].split(/(?<=[。！？!?])/).map(clean).filter(Boolean)
+  let beats = outline
+    .split('\n')
+    .filter(l => !/^\s*(?:【场景[^】]*】|发生[:：]\s*$|不揭示[:：])/.test(l))
+    .map(clean)
+    .filter(Boolean)
+  if (beats.length === 1)
+    beats = beats[0]
+      .split(/(?<=[。！？!?])/)
+      .map(clean)
+      .filter(Boolean)
   return beats
 }
 

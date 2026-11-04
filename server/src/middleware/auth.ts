@@ -30,12 +30,14 @@ export function requirePermission(...permissions: string[]) {
 
     const { getDB } = require('../db')
     const db = getDB()
-    const role = db.prepare('SELECT permissions FROM roles WHERE name = ?').get(req.user.role) as { permissions: string } | undefined
+    const role = db.prepare('SELECT permissions FROM roles WHERE name = ?').get(req.user.role) as
+      | { permissions: string }
+      | undefined
 
     if (!role) return res.status(403).json({ message: '角色不存在' })
 
     const userPerms: string[] = JSON.parse(role.permissions)
-    const hasAll = permissions.every((p) => userPerms.includes(p))
+    const hasAll = permissions.every(p => userPerms.includes(p))
 
     if (!hasAll) return res.status(403).json({ message: '无权限' })
 

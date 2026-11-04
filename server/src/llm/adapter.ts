@@ -24,12 +24,17 @@ function parseSSE(text: string) {
   }
   if (!chunks) throw new Error('not SSE')
   // 流被中途掐断时没有 finish_reason，内容是半截的，不能当成功（实测出过截在句中的角色档案）
-  if (!finish_reason) throw new StreamCutError(content.length)
+  if (!finish_reason) throw new StreamCutError(content)
   return { message: { content, refusal }, finish_reason }
 }
 
-class StreamCutError extends Error {
-  constructor(len: number) { super(`模型响应流中途断开（已收到 ${len} 字，无 finish_reason）`) }
+/** The provider closed the stream before finishing (NovelAI does so after ~110 s); keeps what arrived. */
+export class StreamCutError extends Error {
+  constructor(public partial = '') {
+    super(
+      `模型响应流中途断开（已收到 ${partial.length} 字，无 finish_reason）。NovelAI 单次响应约 110 秒会被服务端断开`,
+    )
+  }
 }
 
 /**
@@ -54,7 +59,10 @@ function parseResponse(text: string): any {
   }
 }
 
-export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
 
 export function isNovelAIKayra(config: LLMConfig) {
   return new URL(config.base_url).hostname === 'text.novelai.net' && config.model_name === 'kayra-v1'
@@ -62,21 +70,40 @@ export function isNovelAIKayra(config: LLMConfig) {
 
 // Kayra uses native text completion, not the GLM/Xialong chat endpoint.
 // Native responses have no finish_reason: require an explicit end marker before accepting an edit.
-async function invokeKayra(config: LLMConfig, messages: ChatMessage[], headers: Record<string, string>, signal: AbortSignal) {
-  if (config.max_tokens > 2000) throw new Error('Kayra 此入口的输出上限最多 2000 tokens，请在模型管理中调整；每段最多 250 tokens。')
+async function invokeKayra(
+  config: LLMConfig,
+  messages: ChatMessage[],
+  headers: Record<string, string>,
+  signal: AbortSignal,
+) {
+  if (config.max_tokens > 2000)
+    throw new Error('Kayra 此入口的输出上限最多 2000 tokens，请在模型管理中调整；每段最多 250 tokens。')
   const marker = 'END_OF_RESPONSE'
   const prompt = `{ ${messages.map(m => m.content).join('\n\n')}\n\n请用简体中文输出结果。全部完成后单独一行输出 ${marker}，随后停止，不复述要求。 }\n`
   let content = ''
   // ponytail: at most eight native calls, bounded by the model config's total output budget.
-  for (let left = config.max_tokens; left > 0;) {
+  for (let left = config.max_tokens; left > 0; ) {
     const max_length = Math.min(250, left)
     const input = prompt + content
-    if (Buffer.byteLength(input, 'utf8') + max_length + 512 > 8192) throw new Error('Kayra 上下文不足，请缩短设定原文后重试；原设定保留。')
+    if (Buffer.byteLength(input, 'utf8') + max_length + 512 > 8192)
+      throw new Error('Kayra 上下文不足，请缩短设定原文后重试；原设定保留。')
     const response = await fetch('https://text.novelai.net/ai/generate', {
-      method: 'POST', headers, signal,
-      body: JSON.stringify({model: config.model_name, input, parameters: {
-        use_string: true, prefix: 'special_instruct', max_length, temperature: Math.max(.1, config.temperature), repetition_penalty: 1.1, repetition_penalty_range: 2048, logit_bias_exp: [],
-      }}),
+      method: 'POST',
+      headers,
+      signal,
+      body: JSON.stringify({
+        model: config.model_name,
+        input,
+        parameters: {
+          use_string: true,
+          prefix: 'special_instruct',
+          max_length,
+          temperature: Math.max(0.1, config.temperature),
+          repetition_penalty: 1.1,
+          repetition_penalty_range: 2048,
+          logit_bias_exp: [],
+        },
+      }),
     })
     if (!response.ok) throw new Error(`LLM API error ${response.status}: ${await response.text()}`)
     const data: any = await response.json()
@@ -86,11 +113,11 @@ async function invokeKayra(config: LLMConfig, messages: ChatMessage[], headers: 
     if (end >= 0) {
       content = content.slice(0, end).trim()
       if (!content) throw new Error('Kayra 返回了空内容')
-      return {content, refusal: '', finish_reason: 'stop'}
+      return { content, refusal: '', finish_reason: 'stop' }
     }
     left -= max_length
   }
-  return {content, refusal: '', finish_reason: 'length'}
+  return { content, refusal: '', finish_reason: 'length' }
 }
 
 /** Counts prompt text, excluding chat framing (the caller reserves a separate margin). */
@@ -99,8 +126,8 @@ export async function countInputTokens(config: LLMConfig, system: string, user: 
   if (new URL(config.base_url).hostname !== 'text.novelai.net') return undefined
   const response = await fetch(`${config.base_url.replace(/\/+$/, '')}/internal/token-count`, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json', Authorization: `Bearer ${config.api_key}`},
-    body: JSON.stringify({model: config.model_name, prompt: system + '\n\n' + user}),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.api_key}` },
+    body: JSON.stringify({ model: config.model_name, prompt: system + '\n\n' + user }),
     signal: AbortSignal.timeout(15000),
   })
   if (!response.ok) throw new Error(`NovelAI token 计数失败（HTTP ${response.status}）`)
@@ -110,10 +137,43 @@ export async function countInputTokens(config: LLMConfig, system: string, user: 
 }
 
 /** 对话测试和小说生成共用传输层；直接保留结束原因，便于区分过滤和输出截断。 */
+export type DeltaHandler = (text: string) => void
+
+/**
+ * Reads the body as it arrives and reports each SSE content delta. The returned raw text is parsed exactly
+ * as before, so deltas are only a live preview and never change the result.
+ */
+async function readStreaming(res: Response, onDelta: DeltaHandler) {
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let raw = ''
+  let pending = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    const chunk = done ? decoder.decode() : decoder.decode(value, { stream: true })
+    raw += chunk
+    pending += chunk
+    const lines = pending.split('\n')
+    pending = done ? '' : lines.pop()!
+    for (const line of lines) {
+      const payload = line.startsWith('data:') ? line.slice(5).trim() : ''
+      if (!payload || payload === '[DONE]') continue
+      try {
+        const text = JSON.parse(payload).choices?.[0]?.delta?.content
+        if (typeof text === 'string' && text) onDelta(text)
+      } catch {
+        // Not a complete JSON event; the final parse decides what the response really was.
+      }
+    }
+    if (done) return raw
+  }
+}
+
 export async function invokeChat(
   config: LLMConfig,
   messages: ChatMessage[],
-): Promise<{content: string; refusal: string; finish_reason: string}> {
+  onDelta?: DeltaHandler,
+): Promise<{ content: string; refusal: string; finish_reason: string }> {
   const url = `${config.base_url.replace(/\/+$/, '')}/chat/completions`
 
   const body = {
@@ -149,7 +209,7 @@ export async function invokeChat(
       throw new Error(`LLM API error ${res.status}: ${text}`)
     }
 
-    const choice = parseResponse(await res.text())
+    const choice = parseResponse(onDelta && res.body ? await readStreaming(res, onDelta) : await res.text())
     const content = choice?.message?.content || ''
     const refusal = choice?.message?.refusal || ''
     // 推理模型的思考过程也占 max_tokens，额度被思考用完时 content 为空，得报出来而不是当成空回复
@@ -158,12 +218,17 @@ export async function invokeChat(
       throw new Error(`模型返回了空内容（finish_reason=${choice?.finish_reason ?? '未知'}）`)
     }
     if (typeof content !== 'string' || typeof refusal !== 'string') throw new Error('模型返回的消息不是文本')
-    return {content,refusal,finish_reason:typeof choice?.finish_reason==='string'?choice.finish_reason:'unknown'}
+    return {
+      content,
+      refusal,
+      finish_reason: typeof choice?.finish_reason === 'string' ? choice.finish_reason : 'unknown',
+    }
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error(`LLM 请求超时 (${config.timeout || 600}s)`)
     }
-    if (err.cause?.code === 'ENOTFOUND' || err.cause?.code === 'EAI_AGAIN') throw new Error(`LLM 无法解析服务域名（${err.cause.code}），请检查网络或 Base URL`)
+    if (err.cause?.code === 'ENOTFOUND' || err.cause?.code === 'EAI_AGAIN')
+      throw new Error(`LLM 无法解析服务域名（${err.cause.code}），请检查网络或 Base URL`)
     if (err.cause?.code) throw new Error(`LLM 连接失败（${err.cause.code}），请检查服务连接`)
     throw err
   } finally {
@@ -171,10 +236,25 @@ export async function invokeChat(
   }
 }
 
-export async function invokeLLMResult(config: LLMConfig, systemPrompt: string, userPrompt: string) {
-  const result = await invokeChat(config,[{role:'system',content:systemPrompt},{role:'user',content:userPrompt}])
+export async function invokeLLMResult(
+  config: LLMConfig,
+  systemPrompt: string,
+  userPrompt: string,
+  onDelta?: DeltaHandler,
+) {
+  const result = await invokeChat(
+    config,
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    onDelta,
+  )
   if (!result.content && result.finish_reason === 'length') throw new OutputTruncatedError()
-  if (!result.content) throw new Error(`模型未提供正文（finish_reason=${result.finish_reason}）${result.refusal ? `：${result.refusal}` : ''}`)
+  if (!result.content)
+    throw new Error(
+      `模型未提供正文（finish_reason=${result.finish_reason}）${result.refusal ? `：${result.refusal}` : ''}`,
+    )
   return result
 }
 
@@ -182,15 +262,4 @@ export async function invokeLLM(config: LLMConfig, systemPrompt: string, userPro
   const result = await invokeLLMResult(config, systemPrompt, userPrompt)
   if (result.finish_reason === 'length') throw new OutputTruncatedError(result.content)
   return result.content
-}
-
-export async function invokeLLMWithConfigName(
-  configName: string,
-  systemPrompt: string,
-  userPrompt: string,
-): Promise<string> {
-  const { getLLMConfigByName } = await import('./config')
-  const config = getLLMConfigByName(configName)
-  if (!config) throw new Error(`LLM 配置 "${configName}" 未找到`)
-  return invokeLLM(config, systemPrompt, userPrompt)
 }

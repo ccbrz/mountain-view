@@ -18,7 +18,9 @@ export interface LLMCallLog {
 }
 
 export function initLogStore() {
-  initTable('llm_call_logs', `
+  initTable(
+    'llm_call_logs',
+    `
     id TEXT PRIMARY KEY,
     novel_id INTEGER NOT NULL,
     task TEXT NOT NULL,
@@ -32,7 +34,8 @@ export function initLogStore() {
     output_tokens INTEGER DEFAULT 0,
     status TEXT DEFAULT 'pending',
     error TEXT DEFAULT ''
-  `)
+  `,
+  )
   getDB().exec(`CREATE INDEX IF NOT EXISTS idx_llm_logs_novel ON llm_call_logs(novel_id, timestamp DESC)`)
 }
 
@@ -47,13 +50,21 @@ export function addLLMCallLog(log: Omit<LLMCallLog, 'id' | 'timestamp'>): string
   }
   const db = getDB()
   db.prepare(
-    'INSERT INTO llm_call_logs (id, novel_id, task, model_name, system_prompt, user_prompt, response, timestamp, duration_ms, input_tokens, output_tokens, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO llm_call_logs (id, novel_id, task, model_name, system_prompt, user_prompt, response, timestamp, duration_ms, input_tokens, output_tokens, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).run(
-    entry.id, entry.novel_id, entry.task, entry.model_name,
-    entry.system_prompt || '', entry.user_prompt || '',
-    entry.response || '', entry.timestamp, entry.duration_ms,
-    entry.input_tokens || 0, entry.output_tokens || 0,
-    entry.status, entry.error || ''
+    entry.id,
+    entry.novel_id,
+    entry.task,
+    entry.model_name,
+    entry.system_prompt || '',
+    entry.user_prompt || '',
+    entry.response || '',
+    entry.timestamp,
+    entry.duration_ms,
+    entry.input_tokens || 0,
+    entry.output_tokens || 0,
+    entry.status,
+    entry.error || '',
   )
   return id
 }
@@ -73,9 +84,9 @@ export function updateLLMCallLog(id: string, updates: Partial<LLMCallLog>): void
 
 export function getLogsByNovelId(novelId: number, limit = 100): LLMCallLog[] {
   const db = getDB()
-  return db.prepare(
-    'SELECT * FROM llm_call_logs WHERE novel_id = ? ORDER BY timestamp DESC LIMIT ?'
-  ).all(novelId, limit) as LLMCallLog[]
+  return db
+    .prepare('SELECT * FROM llm_call_logs WHERE novel_id = ? ORDER BY timestamp DESC LIMIT ?')
+    .all(novelId, limit) as LLMCallLog[]
 }
 
 export function clearLogsByNovelId(novelId: number): void {

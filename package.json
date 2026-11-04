@@ -7,9 +7,19 @@
     "dev:server": "pnpm --filter server run dev",
     "build": "pnpm --filter client run build && pnpm --filter server run build",
     "start": "pnpm --filter server run start",
-    "db:seed": "pnpm --filter server run seed"
+    "db:seed": "pnpm --filter server run seed",
+    "format": "prettier --write \"client/src/**/*.{ts,tsx,css}\" \"client/tests/**/*.ts\" \"server/src/**/*.ts\"",
+    "format:check": "prettier --check \"client/src/**/*.{ts,tsx,css}\" \"client/tests/**/*.ts\" \"server/src/**/*.ts\"",
+    "typecheck": "pnpm --filter server run typecheck && pnpm --filter client exec tsc --noEmit",
+    "test": "pnpm --filter server run test"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3", "esbuild"]
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "prettier": "3.3.3"
   }
 }

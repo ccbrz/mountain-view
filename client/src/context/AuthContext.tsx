@@ -23,8 +23,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const token = localStorage.getItem('token')
     if (token) {
-      api.get('/auth/me')
-        .then((res) => setUser(res.data.user))
+      api
+        .get('/auth/me')
+        .then(res => setUser(res.data.user))
         .catch(() => localStorage.removeItem('token'))
         .finally(() => setLoading(false))
     } else {
@@ -44,11 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = '/login'
   }
 
-  return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
-      {children}
-    </AuthContext.Provider>
-  )
+  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>
 }
 
 export function useAuth() {

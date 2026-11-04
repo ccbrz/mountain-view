@@ -15,7 +15,6 @@ import { getDB } from '../db'
 import { buildModelWriterContext, requireWriterBudget } from './writer-context'
 import { LLMConfig } from './config'
 import { invokeWithRetry, InvokeContext } from './invoke'
-import * as P from './prompts'
 import { parseLooseJSON } from './json-repair'
 
 export interface Patch {
@@ -114,22 +113,33 @@ export async function revisePatchwise(
     outline: string
     acceptedNotes: string[]
     rejectedNotes: string[]
-    styleGuide?: string
-    writingRequirements?: string
-    writer?: {novel: any; settings: WriterSettings; chapter_idx: number; title: string; author_note: string}
+    writer: { novel: any; settings: WriterSettings; chapter_idx: number; title: string; author_note: string }
   },
   ctx: InvokeContext,
   retries = 3,
 ): Promise<ReviseResult> {
-  const context = params.writer ? requireWriterBudget(await buildModelWriterContext(getDB(), params.writer.novel, {
-    chapter_idx: params.writer.chapter_idx, title: params.writer.title, author_note: params.writer.author_note,
-    raw_script: params.outline, content: params.content, instruction: params.acceptedNotes.join('\n'), rejected_notes: params.rejectedNotes,
-    settings: {...params.writer.settings, max_output_tokens: config.max_tokens},
-  }, config, 'patch')) : undefined
+  const context = requireWriterBudget(
+    await buildModelWriterContext(
+      getDB(),
+      params.writer.novel,
+      {
+        chapter_idx: params.writer.chapter_idx,
+        title: params.writer.title,
+        author_note: params.writer.author_note,
+        raw_script: params.outline,
+        content: params.content,
+        instruction: params.acceptedNotes.join('\n'),
+        rejected_notes: params.rejectedNotes,
+        settings: { ...params.writer.settings, max_output_tokens: config.max_tokens },
+      },
+      config,
+      'patch',
+    ),
+  )
   const text = await invokeWithRetry(
     { ...config, temperature: REVISE_TEMPERATURE },
-    context?.system_prompt || P.patchReviseSystemPrompt(params.styleGuide || '', params.writingRequirements),
-    context?.user_prompt || P.USER_PATCH_REVISE(params),
+    context.system_prompt,
+    context.user_prompt,
     retries,
     ctx,
   )
@@ -138,5 +148,5 @@ export async function revisePatchwise(
   if (raw) {
     return { content: params.content, applied: [], failed: [], wordDelta: 0, raw, context }
   }
-  return {...applyPatches(params.content, patches), context}
+  return { ...applyPatches(params.content, patches), context }
 }

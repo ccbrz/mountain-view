@@ -8,14 +8,16 @@ const router = Router()
 router.get('/', authenticate, requirePermission('roles:manage'), (_req, res) => {
   const db = getDB()
   const roles = db.prepare('SELECT * FROM roles ORDER BY id').all() as any[]
-  res.json(roles.map((r) => ({ ...r, permissions: JSON.parse(r.permissions) })))
+  res.json(roles.map(r => ({ ...r, permissions: JSON.parse(r.permissions) })))
 })
 
 router.post('/', authenticate, requirePermission('roles:manage'), (req, res) => {
   const { name, description, permissions } = req.body
   const db = getDB()
   db.prepare('INSERT INTO roles (name, description, permissions) VALUES (?, ?, ?)').run(
-    name, description || '', JSON.stringify(permissions || [])
+    name,
+    description || '',
+    JSON.stringify(permissions || []),
   )
   res.json({ message: 'ok' })
 })
@@ -24,7 +26,9 @@ router.put('/:id', authenticate, requirePermission('roles:manage'), (req, res) =
   const { description, permissions } = req.body
   const db = getDB()
   db.prepare('UPDATE roles SET description = ?, permissions = ? WHERE id = ?').run(
-    description || '', JSON.stringify(permissions || []), req.params.id
+    description || '',
+    JSON.stringify(permissions || []),
+    req.params.id,
   )
   res.json({ message: 'ok' })
 })

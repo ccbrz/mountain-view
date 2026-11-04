@@ -1,7 +1,5 @@
 import { useState, useEffect } from 'react'
-import {
-  Layout, Table, Button, Modal, Form, Input, Select, Tag, message, Card, Space, Tabs,
-} from 'antd'
+import { Table, Button, Modal, Form, Input, Select, Tag, message, Card, Space, Tabs } from 'antd'
 import { PlusOutlined, UserAddOutlined } from '@ant-design/icons'
 import api from '../api'
 
@@ -80,8 +78,11 @@ export default function PermissionManagement() {
 
   const handleDeleteRole = (id: number) => {
     Modal.confirm({
-      title: '确认删除',
-      content: '确定要删除这个角色吗？',
+      title: '删除这个角色？',
+      content: '使用该角色的用户将失去对应权限。',
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
       onOk: async () => {
         await api.delete(`/roles/${id}`)
         message.success('角色已删除')
@@ -113,17 +114,28 @@ export default function PermissionManagement() {
     { title: '名称', dataIndex: 'name', key: 'name' },
     { title: '描述', dataIndex: 'description', key: 'description' },
     {
-      title: '权限', dataIndex: 'permissions', key: 'permissions',
+      title: '权限',
+      dataIndex: 'permissions',
+      key: 'permissions',
       render: (perms: string[]) => (
-        <Space>{perms.map((p) => <Tag key={p}>{p}</Tag>)}</Space>
+        <Space>
+          {perms.map(p => (
+            <Tag key={p}>{p}</Tag>
+          ))}
+        </Space>
       ),
     },
     {
-      title: '操作', key: 'action',
+      title: '操作',
+      key: 'action',
       render: (_: unknown, record: Role) => (
         <Space>
-          <Button type="link" onClick={() => openEditRole(record)}>编辑</Button>
-          <Button type="link" danger onClick={() => handleDeleteRole(record.id)}>删除</Button>
+          <Button type="link" onClick={() => openEditRole(record)}>
+            编辑
+          </Button>
+          <Button type="link" danger onClick={() => handleDeleteRole(record.id)}>
+            删除
+          </Button>
         </Space>
       ),
     },
@@ -133,15 +145,15 @@ export default function PermissionManagement() {
     { title: 'ID', dataIndex: 'id', key: 'id', width: 80 },
     { title: '用户名', dataIndex: 'username', key: 'username' },
     {
-      title: '角色', dataIndex: 'role', key: 'role',
+      title: '角色',
+      dataIndex: 'role',
+      key: 'role',
       render: (role: string, record: User) => (
-        <Select
-          value={role}
-          onChange={(v) => handleRoleChange(record.id, v)}
-          style={{ width: 120 }}
-        >
-          {roles.map((r) => (
-            <Select.Option key={r.name} value={r.name}>{r.name}</Select.Option>
+        <Select value={role} onChange={v => handleRoleChange(record.id, v)} style={{ width: 120 }}>
+          {roles.map(r => (
+            <Select.Option key={r.name} value={r.name}>
+              {r.name}
+            </Select.Option>
           ))}
         </Select>
       ),
@@ -152,40 +164,33 @@ export default function PermissionManagement() {
     {
       key: 'roles',
       label: '角色管理',
-      children: (
-        <Table
-          dataSource={roles}
-          columns={roleColumns}
-          rowKey="id"
-          pagination={false}
-        />
-      ),
+      children: <Table dataSource={roles} columns={roleColumns} rowKey="id" pagination={false} />,
     },
     {
       key: 'users',
       label: `用户管理 (${users.length})`,
-      children: (
-        <Table
-          dataSource={users}
-          columns={userColumns}
-          rowKey="id"
-          pagination={false}
-        />
-      ),
+      children: <Table dataSource={users} columns={userColumns} rowKey="id" pagination={false} />,
     },
   ]
 
   return (
-    <>
-      <Card
-        title="权限管理"
-        extra={
-          <Space>
-            <Button icon={<UserAddOutlined />} onClick={openAddUser}>添加用户</Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreateRole}>新建角色</Button>
-          </Space>
-        }
-      >
+    <div className="mv-page">
+      <header className="mv-page-header">
+        <div>
+          <span className="mv-eyebrow">Members</span>
+          <h1>成员与权限</h1>
+          <p>账号由管理员创建；作者只能看到和编辑自己的作品与模型配置。</p>
+        </div>
+        <div className="mv-page-actions">
+          <Button icon={<UserAddOutlined />} onClick={openAddUser}>
+            添加用户
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreateRole}>
+            新建角色
+          </Button>
+        </div>
+      </header>
+      <Card>
         <Tabs items={tabItems} />
       </Card>
 
@@ -208,12 +213,7 @@ export default function PermissionManagement() {
         </Form>
       </Modal>
 
-      <Modal
-        title="添加用户"
-        open={userModal}
-        onOk={handleAddUser}
-        onCancel={() => setUserModal(false)}
-      >
+      <Modal title="添加用户" open={userModal} onOk={handleAddUser} onCancel={() => setUserModal(false)}>
         <Form form={userForm} layout="vertical">
           <Form.Item name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>
             <Input placeholder="用户名" />
@@ -223,13 +223,15 @@ export default function PermissionManagement() {
           </Form.Item>
           <Form.Item name="role" label="角色" initialValue="user">
             <Select>
-              {roles.map((r) => (
-                <Select.Option key={r.name} value={r.name}>{r.name}</Select.Option>
+              {roles.map(r => (
+                <Select.Option key={r.name} value={r.name}>
+                  {r.name}
+                </Select.Option>
               ))}
             </Select>
           </Form.Item>
         </Form>
       </Modal>
-    </>
+    </div>
   )
 }

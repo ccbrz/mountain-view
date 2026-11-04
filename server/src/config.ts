@@ -15,7 +15,7 @@ export function isProduction() {
 
 export function getAllowedOrigins(): string[] {
   const raw = process.env.ALLOWED_ORIGINS
-  if (raw) return raw.split(',').map((s) => s.trim())
-  if (isProduction()) return [] 
+  if (raw) return raw.split(',').map(s => s.trim())
+  if (isProduction()) return []
   return ['http://localhost:5173', 'http://localhost:3001']
 }

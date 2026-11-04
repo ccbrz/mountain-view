@@ -6,12 +6,11 @@ import rateLimit from 'express-rate-limit'
 import authRoutes from './routes/auth'
 import roleRoutes from './routes/roles'
 import novelRoutes from './routes/novels'
-import novelGeneratorRoutes from './routes/novel-generator'
+import novelToolRoutes from './routes/novel-tools'
 import writerRoutes from './routes/writer'
 import llmConfigRoutes from './routes/llm-configs'
 import { initSchema } from './schema'
 import { initLogStore } from './llm/logstore'
-import { initVectorStore } from './llm/vectorstore'
 import { isProduction, getAllowedOrigins } from './config'
 
 const app = express()
@@ -20,11 +19,13 @@ const PORT = process.env.PORT || 3001
 app.use(helmet())
 
 const allowedOrigins = getAllowedOrigins()
-app.use(cors({
-  // 生产环境未配置 ALLOWED_ORIGINS 时拒绝跨域，而不是放通全部
-  origin: allowedOrigins.length > 0 ? allowedOrigins : !isProduction(),
-  credentials: true,
-}))
+app.use(
+  cors({
+    // 生产环境未配置 ALLOWED_ORIGINS 时拒绝跨域，而不是放通全部
+    origin: allowedOrigins.length > 0 ? allowedOrigins : !isProduction(),
+    credentials: true,
+  }),
+)
 
 app.use(express.json({ limit: '4mb' }))
 
@@ -44,7 +45,7 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/auth', authRoutes)
 app.use('/api/roles', roleRoutes)
 app.use('/api/novels', novelRoutes)
-app.use('/api/novels', novelGeneratorRoutes)
+app.use('/api/novels', novelToolRoutes)
 app.use('/api/novels', writerRoutes)
 app.use('/api/llm-configs', llmConfigRoutes)
 
@@ -57,7 +58,6 @@ if (isProduction()) {
 
 initSchema()
 initLogStore()
-initVectorStore()
 
 app.listen(Number(PORT), process.env.HOST || '0.0.0.0', () => {
   console.log(`Server running on http://localhost:${PORT}`)
